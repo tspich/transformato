@@ -302,3 +302,42 @@ def test_lonepairs_in_common_core():
     # check for ligand 2
     cc_region2 = s1_to_s2.get_common_core_idx_mol2()
     assert (35 in cc_region2 and 36 in cc_region2) == True
+
+@pytest.mark.rbfe
+@pytest.mark.requires_parmed_supporting_lp
+@pytest.mark.skipif(
+    os.getenv("CI") == "true",
+    reason="Skipping tests that cannot pass in github actions",
+)
+def test_setting_up_point_mutation():
+
+    configuration = load_config_yaml(
+        config=f"/site/raid3/johannes/bioinfo/cano2_modif2.yaml",
+        input_dir="/site/raid3/johannes/bioinfo",
+        output_dir="/site/raid3/johannes/bioinfo",
+    )
+
+    s1 = SystemStructure(configuration, "structure1")
+    s2 = SystemStructure(configuration, "structure2")
+    s1_to_s2 = ProposeMutationRoute(s1, s2)
+    s1_to_s2.propose_common_core()
+    s1_to_s2.finish_common_core()
+
+    # mutation_list = s1_to_s2.generate_mutations_to_common_core_for_mol1()
+    # print(f"Die mutation list {mutation_list}")
+    # i = IntermediateStateFactory(
+    #     system=s1,
+    #     configuration=configuration,
+    # )
+
+    # perform_mutations(configuration=configuration,nr_of_mutation_steps_charge=3, nr_of_mutation_steps_cc=3, i=i, mutation_list=mutation_list)
+
+    mutation_list = s1_to_s2.generate_mutations_to_common_core_for_mol2()
+    print(f"Die mutation list {mutation_list}")
+    i = IntermediateStateFactory(
+        system=s2,
+        configuration=configuration,
+    )
+
+    perform_mutations(configuration=configuration,nr_of_mutation_steps_charge=3, i=i, mutation_list=mutation_list)
+

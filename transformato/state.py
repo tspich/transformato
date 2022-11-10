@@ -152,7 +152,7 @@ class IntermediateStateFactory(object):
         self._write_rtf_file(self.system.psfs[env], output_file_base, self.system.tlc)
         self._write_prm_file(self.system.psfs[env], output_file_base, self.system.tlc)
         self._write_toppar_str(output_file_base)
-        self._copy_files(output_file_base)
+        # self._copy_files(output_file_base)
 
         # Create run folder for dcd output for each intst state
         if self.multiple_runs:

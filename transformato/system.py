@@ -39,23 +39,40 @@ class SystemStructure(object):
         if configuration["simulation"]["free-energy-type"] == "rbfe":
             self.envs = set(["complex", "waterbox"])
             for env in self.envs:
-                parameter = self._read_parameters(env)
                 # set up system
                 self.psfs[env] = self._initialize_system(configuration, env)
-                # load parameters
-                self.psfs[env].load_parameters(parameter)
+                # load parameters, by default only the most important toppar files are loaded
+                try:
+                    parameter = self._read_parameters(env)   # TODO: Muss noch fuer RSFE/ASFE implementiert
+                    self.psfs[env].load_parameters(parameter)
+                except pm.exceptions.ParameterError:
+                    parameter = self._read_parameters(env, full_set = True)
+                    self.psfs[env].load_parameters(parameter)
                 # get offset
+                self.tlc = "GUA:CYT:URA:PSU"
                 self.offset[
                     env
                 ] = self._determine_offset_and_set_possible_dummy_properties(
                     self.psfs[env]
                 )
+                self.tlc = ""
 
             # generate rdkit mol object of small molecule
-            self.mol: Chem.Mol = self._generate_rdkit_mol(
-                "complex", self.psfs["complex"][f":{self.tlc}"]
-            )
-            self.graph: nx.Graph = self.mol_to_nx(self.mol)
+            if self.tlc:
+                self.mol: Chem.Mol = self._generate_rdkit_mol(
+                    "complex", self.psfs["complex"][f":{self.tlc}"]
+                )
+                self.graph: nx.Graph = self.mol_to_nx(self.mol)
+            else:
+                # pm.exceptions.MaskError
+                print("Nun sollten wir da sein")
+                self.mol: Chem.Mol = self._generate_rdkit_mol(
+                    "complex", self.psfs["complex"][f":GUA:CYT:URA:PSU"] # Achtung Problem wenn URA auch in RNAB vorkommt?
+                )
+                print(f"Die env {env} und die Atome {self.mol} bzw anzahl der Atome {self.mol.GetNumAtoms()}")
+                self.graph: nx.Graph = self.mol_to_nx(self.mol)
+                self.tlc = "GUA:CYT:URA:PSU"
+
 
         elif (
             configuration["simulation"]["free-energy-type"] == "rsfe"
@@ -140,13 +157,15 @@ class SystemStructure(object):
 
             return G
 
-    def _read_parameters(self, env: str) -> pm.charmm.CharmmParameterSet:
+    def _read_parameters(self, env: str, full_set: bool = False) -> pm.charmm.CharmmParameterSet:
         """
         Reads in topparameters from a toppar dir and ligand specific parameters.
         Parameters
         ----------
         env: str
             waterbox,complex or vacuum
+        full_set: bool
+            wheather all files mentioned in the openmm/toppar.str should be read in, default is False
         Returns
         ----------
         parameter : pm.charmm.CharmmParameterSet
@@ -190,20 +209,34 @@ class SystemStructure(object):
                 cgenff_version = re.findall("\d+\.\d+", cgenff)[0]
                 self.cgenff_version = float(cgenff_version)
 
-        parameter_files += (f"{toppar_dir}/top_all36_prot.rtf",)
-        parameter_files += (f"{toppar_dir}/par_all36m_prot.prm",)
-        parameter_files += (f"{toppar_dir}/par_all36_na.prm",)
-        parameter_files += (f"{toppar_dir}/top_all36_na.rtf",)
-        parameter_files += (f"{toppar_dir}/top_all36_cgenff.rtf",)
-        parameter_files += (f"{toppar_dir}/par_all36_cgenff.prm",)
-        parameter_files += (f"{toppar_dir}/par_all36_lipid.prm",)
-        parameter_files += (f"{toppar_dir}/top_all36_lipid.rtf",)
-        parameter_files += (f"{toppar_dir}/toppar_water_ions.str",)
-        parameter_files += (
-            f"{toppar_dir}/toppar_all36_prot_na_combined.str",
-        )  # if modified aminoacids are needed
-        if os.path.isfile(f"{toppar_dir}/toppar_all36_moreions.str"):
-            parameter_files += (f"{toppar_dir}/toppar_all36_moreions.str",)
+        if full_set:
+            with open(f"{charmm_gui_env}/openmm/toppar.str", "r") as ommtopparstream:
+                for line in ommtopparstream:
+                    if tlc_lower:
+                        if line.strip() != "" and not tlc_lower in line:
+                            filename = line.strip('\n').split('/')[-1]
+                            parameter_files += (f"{toppar_dir}/{filename}", )
+                    else:
+                        if line.strip() != "":
+                            filename = line.strip('\n').split('/')[-1]
+                            parameter_files += (f"{toppar_dir}/{filename}", )
+
+        else:
+            parameter_files += (f"{toppar_dir}/top_all36_prot.rtf",)
+            parameter_files += (f"{toppar_dir}/par_all36m_prot.prm",)
+            parameter_files += (f"{toppar_dir}/par_all36_na.prm",)
+            parameter_files += (f"{toppar_dir}/top_all36_na.rtf",)
+            parameter_files += (f"{toppar_dir}/top_all36_cgenff.rtf",)
+            parameter_files += (f"{toppar_dir}/par_all36_cgenff.prm",)
+            parameter_files += (f"{toppar_dir}/par_all36_lipid.prm",)
+            parameter_files += (f"{toppar_dir}/top_all36_lipid.rtf",)
+            parameter_files += (f"{toppar_dir}/toppar_water_ions.str",)
+            parameter_files += (
+                f"{toppar_dir}/toppar_all36_prot_na_combined.str",
+            )  # if modified aminoacids are needed
+            if os.path.isfile(f"{toppar_dir}/toppar_all36_moreions.str"):
+                parameter_files += (f"{toppar_dir}/toppar_all36_moreions.str",)
+
         # set up parameter objec
         parameter = pm.charmm.CharmmParameterSet(*parameter_files)
         return parameter
@@ -317,10 +350,47 @@ class SystemStructure(object):
 
         return min(idx_list)
 
+    def _create_sdf_file(self) -> str:
+
+        file_path = f"{self.charmm_gui_base}/waterbox/openmm/"
+
+        pdb = pm.read_PDB(f"{file_path}/step3_input.pdb")
+
+        deletedatoms = 0
+        atomid = 0
+        length = len(pdb.atoms)
+        while deletedatoms + atomid < length:
+            if pdb.atoms[atomid].residue.segid != "RNAA":
+                pdb.atoms.remove(pdb.atoms[atomid])
+                deletedatoms += 1
+            else:
+                atomid += 1
+
+        pdb.write_pdb(f"{file_path}/step3_input_tmp.pdb")
+
+        from openbabel import openbabel
+        obConversion = openbabel.OBConversion()
+        obConversion.SetInAndOutFormats("pdb", "sdf")
+        mol = openbabel.OBMol()
+        obConversion.ReadFile( mol,f"{file_path}/step3_input_tmp.pdb")
+        obConversion.WriteFile( mol,f"{file_path}/step3_input_reduced.sdf")
+
+        return f"{file_path}/step3_input_reduced.sdf"
+
+
+
+    def _return_strand(self):
+        
+        sdf_file = self._create_sdf_file()
+
+        suppl = Chem.SDMolSupplier
+
+
+
     def _return_small_molecule(self, env: str) -> Chem.rdchem.Mol:
         import glob
 
-        charmm_gui_env = self.charmm_gui_base + env
+        charmm_gui_env = self.charmm_gui_base + "waterbox"
         possible_files = []
         for ending in ["sdf", "mol", "mol2"]:
             possible_files.extend(glob.glob(f"{charmm_gui_env}/*/*{ending}"))
@@ -367,7 +437,19 @@ class SystemStructure(object):
         """
 
         assert type(psf) == pm.charmm.CharmmPsfFile
+        
+        # if self.tlc: 
+        #     mol = self._return_small_molecule(env)
+        
+        try:
+            self._return_strand()
+        except:
+            pass
+
         mol = self._return_small_molecule(env)
+
+        print(f"Wir sind jetzt dort und das ist mol {mol.GetNumAtoms()}")
+
         (
             atom_idx_to_atom_name,
             _,
@@ -413,16 +495,30 @@ class SystemStructure(object):
         atom_name_to_atom_type = dict()
         atom_idx_to_atom_partial_charge = dict()
 
-        for atom in psf.view[f":{self.tlc}"].atoms:
-            atom_name = atom.name
-            atom_index = atom.idx
-            atom_type = atom.type
-            atom_charge = atom.charge
+        if self.tlc:
+            print(f"Da sollten wir eigentlich nicht sein {self.tlc}")
+            for atom in psf.view[f":{self.tlc}"].atoms:
+                atom_name = atom.name
+                atom_index = atom.idx
+                atom_type = atom.type
+                atom_charge = atom.charge
 
-            atom_idx_to_atom_name[atom_index] = atom_name
-            atom_name_to_atom_idx[atom_name] = atom_index
-            atom_name_to_atom_type[atom_name] = atom_type
-            atom_idx_to_atom_partial_charge[atom_index] = atom_charge
+                atom_idx_to_atom_name[atom_index] = atom_name
+                atom_name_to_atom_idx[atom_name] = atom_index
+                atom_name_to_atom_type[atom_name] = atom_type
+                atom_idx_to_atom_partial_charge[atom_index] = atom_charge
+        else:
+            for atom in psf.view.struct.atoms:
+                atom_name = atom.name
+                atom_index = atom.idx
+                atom_type = atom.type
+                atom_charge = atom.charge
+
+                atom_idx_to_atom_name[atom_index] = atom_name
+                atom_name_to_atom_idx[atom_name] = atom_index
+                atom_name_to_atom_type[atom_name] = atom_type
+                atom_idx_to_atom_partial_charge[atom_index] = atom_charge
+
 
         return (
             atom_idx_to_atom_name,
