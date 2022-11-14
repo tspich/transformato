@@ -1191,7 +1191,7 @@ class ProposeMutationRoute(object):
             list of mutations
         """
         m = self._mutate_to_common_core(
-            self.dummy_region_cc1, self.get_common_core_idx_mol2(), mol_name="m2"
+            self.dummy_region_cc2, self.get_common_core_idx_mol2(), mol_name="m2"
         )
 
         if not self.asfe:
