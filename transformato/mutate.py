@@ -21,7 +21,7 @@ from transformato.annihilation import calculate_order_of_LJ_mutations_asfe
 
 
 logger = logging.getLogger(__name__)
-
+logging.basicConfig(stream=logger, level=logging.DEBUG)
 
 def _flattened(list_of_lists: list) -> list:
     return [item for sublist in list_of_lists for item in sublist]
@@ -1194,9 +1194,6 @@ class ProposeMutationRoute(object):
             self.dummy_region_cc2, self.get_common_core_idx_mol2(), mol_name="m2"
         )
 
-        if not self.asfe:
-            m["transform"] = self._transform_common_core()
-
         return m
 
     def _transform_common_core(self) -> list:
@@ -1506,23 +1503,40 @@ class CommonCoreTransformation(object):
 
             # compare to charge compenstated psf 2
             for ligand2_atom in self.charge_compensated_ligand2_psf:
-                if self.atom_names_mapping[ligand1_atom.name] == ligand2_atom.name:
+                if self.atom_names_mapping[ligand1_atom.name] == ligand2_atom.name and ligand1_atom.residue.name == ligand2_atom.residue.name and ligand1_atom.type == ligand2_atom.type and len(ligand1_atom.residue.atoms) == len(ligand2_atom.residue.atoms):
                     found = True
                     # are the atoms different?
-                    logger.debug(f"Modifying atom: {ligand1_atom}")
-                    logger.debug(f"Template atom: {ligand2_atom}")
+                    print(f"Modifying atom: {ligand1_atom}")
+                    print(f"Template atom: {ligand2_atom}")
 
                     # scale epsilon
                     modified_charge = (
                         scale * ligand1_atom.charge + (1 - scale) * ligand2_atom.charge
                     )
-                    logger.debug(
+                    print(
                         f"Current charge: {ligand1_atom.charge}; target charge: {ligand2_atom.charge}; modified charge: {modified_charge}"
                     )
                     ligand1_atom.charge = modified_charge
 
             if not found:
-                raise RuntimeError("No corresponding atom in cc2 found")
+                try:
+                    for ligand2_atom in self.charge_compensated_ligand2_psf:
+                        if self.atom_names_mapping[ligand1_atom.name] == ligand2_atom.name and len(ligand1_atom.residue.atoms) == len(ligand2_atom.residue.atoms):
+                            found = True
+                            # are the atoms different?
+                            print(f"Modifying atom: {ligand1_atom}")
+                            print(f"Template atom: {ligand2_atom}")
+
+                            # scale epsilon
+                            modified_charge = (
+                                scale * ligand1_atom.charge + (1 - scale) * ligand2_atom.charge
+                            )
+                            print(
+                                f"Current charge: {ligand1_atom.charge}; target charge: {ligand2_atom.charge}; modified charge: {modified_charge}"
+                            )
+                            ligand1_atom.charge = modified_charge
+                except:
+                    raise RuntimeError(f"No corresponding atom for {ligand1_atom} in cc2 found")
 
     def _mutate_atoms(self, psf: pm.charmm.CharmmPsfFile, lambda_value: float):
         """
@@ -1551,7 +1565,7 @@ class CommonCoreTransformation(object):
                 if self.atom_names_mapping[ligand1_atom.name] == ligand2_atom.name:
                     found = True
                     # are the atoms different?
-                    if ligand1_atom.type != ligand2_atom.type and ligand1_atom.residue.name == ligand2_atom.residue.name:
+                    if ligand1_atom.type != ligand2_atom.type and len(ligand1_atom.residue.atoms) == len(ligand2_atom.residue.atoms):
                         if "DDX" in ligand1_atom.type:
                             logger.warning(
                                 "This is the terminal LJ atom. If everything went correct, this does not have to change atom types."
@@ -1601,9 +1615,7 @@ class CommonCoreTransformation(object):
         for ligand1_bond in psf.view[f":{self.tlc_cc1}"].bonds:
 
             ligand1_atom1_name = ligand1_bond.atom1.name
-            print(f"das ist atom 1 {ligand1_atom1_name}")
             ligand1_atom2_name = ligand1_bond.atom2.name
-            print(f"undl atom 2 {ligand1_atom2_name}")
             # all atoms of the bond must be in cc
             # everything outside the cc are bonded terms between dummies or
             # between real atoms and dummies and we can ignore them for now
@@ -1612,7 +1624,7 @@ class CommonCoreTransformation(object):
                 for elem in [ligand1_atom1_name, ligand1_atom2_name]
             ):
                 continue
-            print("wir machen weiter")
+
             found = False
             for ligand2_bond in self.ligand2_psf.bonds:
                 ligand2_atom1_name = ligand2_bond.atom1.name
@@ -1637,14 +1649,14 @@ class CommonCoreTransformation(object):
                         [ligand1_bond.atom1.type, ligand1_bond.atom2.type]
                     ) == sorted([ligand2_bond.atom1.type, ligand2_bond.atom2.type]):
                         continue
-                    logger.debug(f"Modifying bond: {ligand1_bond}")
+                    print(f"Modifying bond: {ligand1_bond}")
 
-                    logger.debug(f"Template bond: {ligand2_bond}")
+                    print(f"Template bond: {ligand2_bond}")
                     modified_k = (lambda_value * ligand1_bond.type.k) + (
                         (1.0 - lambda_value) * ligand2_bond.type.k
                     )
 
-                    logger.debug(
+                    print(
                         f"Current k: {ligand1_bond.type.k}; target k: {ligand2_bond.type.k}; new k: {modified_k}"
                     )
 

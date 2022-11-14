@@ -46,6 +46,7 @@ def test_setting_up_point_mutation():
 
     mutation_list = s1_to_s2.generate_mutations_to_common_core_for_mol1()
     print(f"Die mutation list {mutation_list}")
+    print(mutation_list["transform"][0].__dict__)
     i = IntermediateStateFactory(
         system=s1,
         configuration=configuration,
