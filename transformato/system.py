@@ -28,6 +28,9 @@ class SystemStructure(object):
 
         self.structure: str = structure
         self.name: str = configuration["system"][structure]["name"]
+        #if len(configuration["system"][structure]["tlc"].split()) > 1:
+        #    self.tlc: list = configuration["system"][structure]["tlc"].split()
+        #else:
         self.tlc: str = configuration["system"][structure]["tlc"]
         self.charmm_gui_base: str = configuration["system"][structure]["charmm_gui_dir"]
         self.offset: defaultdict = defaultdict(int)
@@ -39,9 +42,9 @@ class SystemStructure(object):
         except KeyError:
             self.ff: str = "charmm"
             self.psfs: defaultdict = defaultdict(pm.charmm.CharmmPsfFile)
-            self.parameter = self._read_parameters(
-                "waterbox"
-            )  # not sure if this is really needed
+            #self.parameter = self._read_parameters(
+            #    "waterbox"
+            #)  # not sure if this is really needed
             self.cgenff_version: float
 
         # running a binding-free energy calculation?
@@ -197,7 +200,10 @@ class SystemStructure(object):
 
         charmm_gui_env = self.charmm_gui_base + env
         tlc = self.tlc
-        tlc_lower = str(tlc).lower()
+        if type(tlc) == str: 
+            tlc_lower = str(tlc).lower()
+        else:
+            tlc_lower = tlc
         toppar_dir = f"{charmm_gui_env}/toppar"
 
         if os.path.isdir(toppar_dir):
@@ -496,17 +502,29 @@ class SystemStructure(object):
         """
 
         atom_idx_to_atom_name = dict()
-        atom_name_to_atom_idx = dict()
-        atom_name_to_atom_type = dict()
+        #atom_name_to_atom_idx = dict()
+        #atom_name_to_atom_type = dict()
+        atom_idx_to_atom_type = dict()
         atom_idx_to_atom_partial_charge = dict()
+        #atom_idx_to_name_type_charge = dict()
 
         ## We need this for point mutations, because if we give a resid, the mol here
         ## consists only of on residue which resid is always 1
-        try:
-            int(self.tlc)
-            tlc = "1"
-        except ValueError:
-            tlc = self.tlc
+        #try:
+        #    int(self.tlc)
+        #    tlc = "1"
+        #except ValueError:
+        #    tlc = self.tlc
+        if ',' in self.tlc:
+            tlc_split = self.tlc.split(',')
+            tlc= ""
+            for i, v in enumerate(tlc_split):
+                if i < len(tlc_split)-1:
+                    tlc += str(i+1)+','
+                else:
+                    tlc += str(i+1)
+        else:
+            tlc='1'
 
         for atom in psf.view[f":{tlc}"].atoms:
             atom_name = atom.name
@@ -514,16 +532,18 @@ class SystemStructure(object):
             atom_type = atom.type
             atom_charge = atom.charge
 
+            #atom_idx_to_name_type_charge[atom_index] =
+
             atom_idx_to_atom_name[atom_index] = atom_name
-            atom_name_to_atom_idx[atom_name] = atom_index
-            atom_name_to_atom_type[atom_name] = atom_type
+            #atom_name_to_atom_idx[atom_name] = atom_index
+            #atom_name_to_atom_type[atom_name] = atom_type
+            atom_idx_to_atom_type[atom_index] = atom_type
             atom_idx_to_atom_partial_charge[atom_index] = atom_charge
 
         for atom in mol.GetAtoms():
             atom.SetProp("atom_name", atom_idx_to_atom_name[atom.GetIdx()])
             atom.SetProp(
-                "atom_type",
-                atom_name_to_atom_type[atom_idx_to_atom_name[atom.GetIdx()]],
+                "atom_type", atom_idx_to_atom_type[atom.GetIdx()],
             )
             atom.SetProp("atom_index", str(atom.GetIdx()))
             atom.SetProp(

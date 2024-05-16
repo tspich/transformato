@@ -873,11 +873,23 @@ class ProposeMutationRoute(object):
         ):
             ## We need this for point mutations, because if we give a resid, the mol here
             ## consists only of on residue which resid is always 1
-            try:
-                int(tlc)
-                tlc = "1"
-            except ValueError:
-                tlc = tlc
+            #try:
+            #    int(tlc)
+            #    tlc = "1"
+            #except ValueError:
+            #    tlc = tlc
+
+            if ',' in tlc:
+                tlc_split = tlc.split(',')
+                tlc= ""
+                for i, v in enumerate(tlc_split):
+                    if i < len(tlc_split)-1:
+                        tlc += str(i+1)+','
+                    else:
+                        tlc += str(i+1)
+            else:
+                tlc='1'
+
             # set `initial_charge` parameter for Mutation
             for atom in psf.view[f":{tlc}"].atoms:
                 # charge, epsilon and rmin are directly modiefied
@@ -1483,11 +1495,23 @@ class ProposeMutationRoute(object):
         mutations = defaultdict(list)
         ## We need this for point mutations, because if we give a resid, the mol here
         ## consists only of on residue which resid is always 1
-        try:
-            int(self.s1_tlc)
-            tlc = "1"
-        except ValueError:
-            tlc = self.s1_tlc
+        #try:
+        #    int(self.s1_tlc)
+        #    tlc = "1"
+        #except ValueError:
+        #    tlc = self.s1_tlc
+
+        if ',' in self.s1_tlc:
+            tlc_split = self.s1_tlc.split(',')
+            tlc= ""
+            for i, v in enumerate(tlc_split):
+                if i < len(tlc_split)-1:
+                    tlc += str(i+1)+','
+                else:
+                    tlc += str(i+1)
+        else:
+            tlc='1'
+
         if self.asfe:
             psf = self.psf1["waterbox"]
             cc_idx = []  # no CC in ASFE
@@ -1510,11 +1534,16 @@ class ProposeMutationRoute(object):
             if mol_name == "m2":
                 ## We need this for point mutations, because if we give a resid, the mol here
                 ## consists only of on residue which resid is always 1
-                try:
-                    int(self.s2_tlc)
-                    tlc = "1"
-                except ValueError:
-                    tlc = self.s2_tlc
+                if ',' in self.s2_tlc:
+                    tlc_split = self.s2_tlc.split(',')
+                    tlc= ""
+                    for i, v in enumerate(tlc_split):
+                        if i < len(tlc_split)-1:
+                            tlc += str(i+1)+','
+                        else:
+                            tlc += str(i+1)
+                else:
+                    tlc='1'
 
         # iterate through atoms and select atoms that need to be mutated
         atoms_to_be_mutated = []

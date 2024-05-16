@@ -252,15 +252,27 @@ class IntermediateStateFactory(object):
         """
 
         workloadmanager = self.configuration["simulation"]["workload-manager"]
-        with open(
-            f"{self.configuration['bin_dir']}/{workloadmanager}-preamble.sh", "r"
-        ) as preamblefile:
-            preamble = preamblefile.read()
+        partition = self.configuration["simulation"]["manager-partition"]
+        gres = self.configuration["simulation"]["manager-gres"]
+        conda_env = self.configuration["simulation"]["manager-env"]
+        #with open(
+        #    f"{self.configuration['bin_dir']}/{workloadmanager}-preamble.sh", "r"
+        #) as preamblefile:
+        #    preamble = preamblefile.read()
+
+        preamble = f"#!/bin/bash\n#SBATCH -p {partition}\n#SBATCH --gres={gres}\n\n"
+
+        conda_preamble = f"source ~/.bashrc\nconda activate {conda_env}\n"
 
         with open(filepath, "r+") as script_to_prepend_to:
             content = script_to_prepend_to.read()
             script_to_prepend_to.seek(0)
-            script_to_prepend_to.write(f"{preamble}\n{content}")
+            script_to_prepend_to.write(f"{preamble}\n")
+            if "manager-qos" in self.configuration["simulation"].keys():
+                qos = self.configuration["simulation"]["manager-qos"]
+                script_to_prepend_to.write(f"#SBATCH --qos={qos}")
+            script_to_prepend_to.write(f"{conda_preamble}")
+            script_to_prepend_to.write(f"{content}")
 
     def _copy_charmm_files(self, intermediate_state_file_path: str):
         """
