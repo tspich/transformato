@@ -5,10 +5,11 @@ channels:
 dependencies:
   # Base depends
   - openmm
+  - python<3.12
   - openmmtools
   - numpy
   - ipython
-  - pymbar
+  - pymbar=3
   - rdkit
   - parmed
   - pyyaml
