@@ -9,7 +9,7 @@ dependencies:
   - openmmtools
   - numpy
   - ipython
-  - pymbar=3
+  - pymbar>=4
   - rdkit
   - parmed
   - pyyaml

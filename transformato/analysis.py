@@ -27,6 +27,22 @@ from transformato.utils import get_structure_name, isnotebook
 logger = logging.getLogger(__name__)
 
 
+# pymbar renamed its public methods from camelCase (v3) to snake_case (v4) and
+# dropped the `return_dict` argument (v4 always returns a dict). The returned
+# dict keys ("Delta_f", "dDelta_f", "matrix") are identical across versions, so
+# these thin shims let transformato run on both pymbar 3 and 4.
+def _mbar_free_energy_differences(mbar_obj) -> dict:
+    if hasattr(mbar_obj, "compute_free_energy_differences"):  # pymbar >= 4
+        return mbar_obj.compute_free_energy_differences()
+    return mbar_obj.getFreeEnergyDifferences(return_dict=True)  # pymbar 3
+
+
+def _mbar_overlap(mbar_obj) -> dict:
+    if hasattr(mbar_obj, "compute_overlap"):  # pymbar >= 4
+        return mbar_obj.compute_overlap()
+    return mbar_obj.computeOverlap()  # pymbar 3
+
+
 def return_reduced_potential(
     potential_energy: unit.Quantity,
     volume: unit.Quantity,
@@ -332,8 +348,8 @@ class FreeEnergyCalculator(object):
             nr_of_snapshots = N_k[env][d] + N_k[env][d + 1]
             u_kn_ = u_kn[d : d + 2 :, start : start + nr_of_snapshots]
             m = mbar.MBAR(u_kn_, N_k[env][d : d + 2])
-            logger.debug(m.getFreeEnergyDifferences(return_dict=True)["Delta_f"][0, 1])
-            logger.debug(m.getFreeEnergyDifferences(return_dict=True)["dDelta_f"][0, 1])
+            logger.debug(_mbar_free_energy_differences(m)["Delta_f"][0, 1])
+            logger.debug(_mbar_free_energy_differences(m)["dDelta_f"][0, 1])
 
             start += N_k[env][d]
 
@@ -728,9 +744,7 @@ class FreeEnergyCalculator(object):
     def free_energy_differences(self, env="vacuum"):
         """matrix of free energy differences"""
         try:
-            r = self.mbar_results[env].getFreeEnergyDifferences(return_dict=True)[
-                "Delta_f"
-            ]
+            r = _mbar_free_energy_differences(self.mbar_results[env])["Delta_f"]
         except KeyError:
             raise KeyError(f"Free energy difference not obtained for : {env}")
         return r
@@ -738,7 +752,7 @@ class FreeEnergyCalculator(object):
     def free_energy_overlap(self, env="vacuum"):
         """overlap of lambda states"""
         try:
-            r = self.mbar_results[env].computeOverlap()["matrix"]
+            r = _mbar_overlap(self.mbar_results[env])["matrix"]
         except KeyError:
             raise KeyError(f"Free energy overlap not obtained for : {env}")
 
@@ -747,9 +761,7 @@ class FreeEnergyCalculator(object):
     def free_energy_difference_uncertainties(self, env="vacuum"):
         """matrix of asymptotic uncertainty-estimates accompanying free energy differences"""
         try:
-            r = self.mbar_results[env].getFreeEnergyDifferences(return_dict=True)[
-                "dDelta_f"
-            ]
+            r = _mbar_free_energy_differences(self.mbar_results[env])["dDelta_f"]
         except KeyError:
             raise KeyError(f"Free energy uncertanties not obtained for : {env}")
         return r
