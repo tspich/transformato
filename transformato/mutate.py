@@ -1770,11 +1770,18 @@ class CommonCoreTransformation(object):
                                     .name
                                     == ligand1_atom.name
                                 )
-                                pm.tools.actions.changeLJSingleType(
+                                #pm.tools.actions.changeLJSingleType(
+                                #    psf,
+                                #    f":{self.tlc_cc1}@{ligand1_atom.idx+1}",
+                                #    modified_rmin,
+                                #    modified_epsilon,
+                                #).execute()
+
+                                pm.tools.actions.addLJType(
                                     psf,
                                     f":{self.tlc_cc1}@{ligand1_atom.idx+1}",
-                                    modified_rmin,
-                                    modified_epsilon,
+                                    radius=modified_rmin,
+                                    epsilon=modified_epsilon,
                                 ).execute()
 
             if not found:
@@ -2203,12 +2210,18 @@ class Mutation(object):
                 # do this only when using GAFF
                 if type(psf) == pm.amber.AmberParm:
                     assert psf[f":{self.tlc}@{atom.idx+1}"].atoms[0].name == atom.name
-                    pm.tools.actions.changeLJSingleType(
+                    pm.tools.actions.addLJType(
                         psf,
                         f":{self.tlc}@{atom.idx+1}",
-                        1.5,
-                        0.15,  ### ATTENTION: This should be -0.15 but somehow GAFF does not like negative values
+                        radius=1.5,
+                        epsilon=0.15,
                     ).execute()
+                    #pm.tools.actions.changeLJSingleType(
+                    #    psf,
+                    #    f":{self.tlc}@{atom.idx+1}",
+                    #    1.5,
+                    #    0.15,  ### ATTENTION: This should be -0.15 but somehow GAFF does not like negative values
+                    #).execute()
 
             else:
                 logger.info("Mutate to dummy")

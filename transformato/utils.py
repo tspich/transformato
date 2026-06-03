@@ -171,6 +171,22 @@ def load_config_yaml(config, input_dir, output_dir) -> dict:
                 "nsteps size and nstdcd size in config file does not match"
             )
 
+    # validate the HMR hydrogen mass and check it is consistent with the timestep
+    if settingsMap["simulation"].get("HMR", False):
+        hydrogen_mass = settingsMap["simulation"].get("hydrogen_mass", 1.5)
+        if not isinstance(hydrogen_mass, (int, float)) or hydrogen_mass <= 0:
+            raise ValueError(
+                f"simulation.hydrogen_mass must be a positive number (Da), got {hydrogen_mass}"
+            )
+        dt = settingsMap["simulation"]["parameters"].get("dt")
+        if dt is not None and dt * 1000 >= 4.0 and hydrogen_mass < 3.0:
+            # A 4 fs timestep needs hydrogens repartitioned to ~3.024 Da (the AMBER
+            # convention); the historical default of 1.5 Da only supports ~2.5 fs.
+            logger.warning(
+                f"HMR: a {dt * 1000:.1f} fs timestep needs simulation.hydrogen_mass "
+                f"~3.024 Da, but it is {hydrogen_mass} Da, which only supports ~2.5 fs."
+            )
+
     # set the bin, data and analysis dir
     settingsMap["bin_dir"] = get_bin_dir()
     settingsMap["analysis_dir_base"] = os.path.abspath(f"{output_dir}")
