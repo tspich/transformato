@@ -666,6 +666,15 @@ class IntermediateStateFactory(object):
         if not self.drude:
             # copy ligand rtf file
             ligand_rtf = f"{basedir}/waterbox/{self.system.tlc.lower()}/{self.system.tlc.lower()}.str"
+            if not os.path.isfile(ligand_rtf):
+                # No ligand-specific str/rtf (e.g. numeric tlc for an RNA/protein
+                # point mutation) -- the parameters live in the standard toppar,
+                # so there is nothing ligand-specific to copy.
+                logger.info(
+                    f"No ligand-specific str file at {ligand_rtf} -- assuming a "
+                    "point mutation (no ligand toppar); skipping."
+                )
+                return
             toppar_target = (
                 f"{intermediate_state_file_path}/{self.system.tlc.lower()}.str"
             )
