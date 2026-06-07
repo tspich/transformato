@@ -11,10 +11,36 @@ uridine (U) and pseudouridine (Ψ), and more generally any mutation where a bond
 |---|---|---|
 | 0 | Explicit common-core atom mapping (bypass MCS) | **done** — `ProposeMutationRoute.set_common_core_mapping`; tests in `tests/test_common_core_mapping.py` |
 | 1a | Graceful bonded-term **breaking** (k→0 when no counterpart), gated by `allow_bonded_topology_change` | **done** — `_mutate_bonds/_angles/_torsions`; tests in `tests/test_bond_breaking.py` |
-| 1b | Bonded-term **forming** (insert a bond present only in the other ligand) | **sketched** — step-by-step in §4 Phase 1b; PSF topology insertion |
+| 1b | Bonded-term **forming** (insert a bond present only in the other ligand) | **done for CHARMM** — `_form_missing_bonds/_angles/_torsions`; Amber raises `NotImplementedError`; tests in `tests/test_bond_forming.py` |
 | 2 | Shared-endstate accounting / cycle closure | spec'd in §4 Phase 2 (architecture noted); test not written |
-| 3 | Geometry & sampling safeguards | approach decided (sequenced break/form + restraint), §4 Phase 3 / §5 |
-| 4 | Validation on a nucleoside | not started |
+| 3 | Geometry & sampling safeguards | partial — schedule chosen (see 1b note); restraint not yet built |
+| 4 | Validation on a nucleoside | not started — needs a Ψ/U test system; logic unit-tested, end-to-end not yet |
+
+**Phase 1b implementation notes (2026-06-07).**
+- Forming is gated by the same `allow_bonded_breaking` /
+  `allow_bonded_topology_change` flag as breaking, so the MCS path is untouched
+  (regression: `test_acetylacetone_tautomer_pair` still passes).
+- **Idempotent insertion.** `write_state` mutates the *same* psf object across all
+  λ-states, so forming terms are inserted find-or-create and tagged
+  `_tf_forming`; the forward matching loops skip tagged terms. Re-applying across
+  λ does not duplicate.
+- **Schedule (deviation from the §5 "sequenced" plan, on purpose).** Forming
+  bonds/angles use an **overlapping linear** ramp (`k = (1−λ)·k_cc2`), the mirror
+  of the committed linear breaking (`k = λ·k_cc1`). At every λ the base is held by
+  *some* glycosidic force constant, so it cannot dissociate — this is runnable
+  **without** the restraint that a fully-sequenced (detached-at-midpoint) schedule
+  would require. The midpoint is mildly doubly-tethered (strained 4-membered
+  C1′–N1–C6–C5 ring) instead. Forming torsions keep the **sequenced** factor
+  (`f = 1 − min(2λ, 1)`), matching the existing matched-torsion convention.
+  Revisit once the Phase 3 restraint exists: if the strained midpoint hurts MBAR
+  overlap, switch bonds/angles to sequenced + restraint.
+- **Amber not yet supported** for forming: inserting a bond into an `AmberParm`
+  needs `remake_parm` + exclusion-list rebuild (§4 Phase 1b step 5). Forming on an
+  Amber topology raises `NotImplementedError`; use CHARMM for Ψ↔U for now.
+- **Still unvalidated end-to-end:** the parmed insertion + CHARMM writer path is
+  exercised by unit tests on hand-built structures, but not yet on a real Ψ/U
+  system. Phase 4 must confirm the written `.psf`/`dummy_parameters.prm` and
+  cycle closure.
 
 **Approach decision (2026-06-07): Option A** (direct single-topology bond
 migration), with the sequenced break/form λ schedule as the geometry mitigation;

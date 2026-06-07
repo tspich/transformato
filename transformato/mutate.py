@@ -1717,6 +1717,10 @@ class CommonCoreTransformation(object):
 
         mod_type = namedtuple("Bond", "k, req")
         for ligand1_bond in psf.view[f":{self.tlc_cc1}"].bonds:
+            if getattr(ligand1_bond, "_tf_forming", False):
+                # a bond we inserted on a previous lambda-state (forming bond) --
+                # handled by _form_missing_bonds, skip the forward matching.
+                continue
             ligand1_atom1_name = ligand1_bond.atom1.name
             ligand1_atom2_name = ligand1_bond.atom2.name
             # all atoms of the bond must be in cc
@@ -1799,9 +1803,14 @@ class CommonCoreTransformation(object):
                         modified_req,
                     ).execute()
 
+        if self.allow_bonded_breaking:
+            self._form_missing_bonds(psf, lambda_value, mod_type)
+
     def _mutate_angles(self, psf: pm.charmm.CharmmPsfFile, lambda_value: float):
         mod_type = namedtuple("Angle", "k, theteq")
         for cc1_angle in psf.view[f":{self.tlc_cc1}"].angles:
+            if getattr(cc1_angle, "_tf_forming", False):
+                continue
             ligand1_atom1_name = cc1_angle.atom1.name
             ligand1_atom2_name = cc1_angle.atom2.name
             cc1_a3 = cc1_angle.atom3.name
@@ -1891,11 +1900,16 @@ class CommonCoreTransformation(object):
                         modified_theteq,
                     ).execute()
 
+        if self.allow_bonded_breaking:
+            self._form_missing_angles(psf, lambda_value, mod_type)
+
     def _mutate_torsions(self, psf: pm.charmm.CharmmPsfFile, lambda_value: float):
         mod_type = namedtuple("Torsion", "phi_k, per, phase, scee, scnb")
 
         # get all torsions present in initial topology
         for original_torsion in psf.view[f":{self.tlc_cc1}"].dihedrals:
+            if getattr(original_torsion, "_tf_forming", False):
+                continue
             found: bool = False
             original_atom1_name = original_torsion.atom1.name
             original_atom2_name = original_torsion.atom2.name
@@ -2053,6 +2067,184 @@ class CommonCoreTransformation(object):
                     f"(lambda={lambda_value})"
                 )
                 original_torsion.mod_type = mod_types
+
+        if self.allow_bonded_breaking:
+            self._form_missing_torsions(psf, lambda_value, mod_type)
+
+    # ------------------------------------------------------------------ #
+    # Bond/angle/torsion *forming* (Phase 1b, see DESIGN_pseudouridine.md)
+    #
+    # A migrating bond means some common-core terms exist in the target
+    # ligand (cc2) but not in the ligand being mutated (cc1). They must be
+    # inserted into the psf and ramped on (k: 0 -> full) as the common core
+    # is approached. write_state mutates the same psf object across all
+    # lambda-states, so insertion is idempotent (find-or-create) and the
+    # forward matching loops skip terms we inserted (``_tf_forming``).
+    # ------------------------------------------------------------------ #
+    def _inverse_atom_mapping(self) -> dict:
+        """cc2 atom name -> cc1 atom name (inverse of self.atom_names_mapping)."""
+        return {v: k for k, v in self.atom_names_mapping.items()}
+
+    def _cc_atoms_by_name(self, psf) -> dict:
+        """name -> parmed atom for the common-core (mutated ligand) view."""
+        return {atom.name: atom for atom in psf.view[f":{self.tlc_cc1}"].atoms}
+
+    @staticmethod
+    def _cc2_names_in_cc(names, inverse_mapping) -> bool:
+        """True if every cc2 atom name is part of the common core."""
+        return all(n in inverse_mapping for n in names)
+
+    def _form_missing_bonds(self, psf, lambda_value, mod_type):
+        """Insert/ramp cc2 bonds that have no counterpart in cc1 (forming bonds)."""
+        inverse = self._inverse_atom_mapping()
+        name_to_atom = self._cc_atoms_by_name(psf)
+        # real (non-forming) bonds already present in cc1, keyed by name pair
+        existing = {
+            frozenset((b.atom1.name, b.atom2.name))
+            for b in psf.view[f":{self.tlc_cc1}"].bonds
+            if not getattr(b, "_tf_forming", False)
+        }
+        # forming ramps on over lambda: 0 at lambda=1 (cc1), full at lambda=0 (cc)
+        f = 1.0 - lambda_value
+        for lig2_bond in self.ligand2_psf.bonds:
+            names2 = (lig2_bond.atom1.name, lig2_bond.atom2.name)
+            if not self._cc2_names_in_cc(names2, inverse):
+                continue
+            cc1_names = frozenset(inverse[n] for n in names2)
+            if cc1_names in existing:
+                continue  # already a real cc1 bond -> matched/breaking path handles it
+            a_i, a_j = (name_to_atom.get(inverse[names2[0]]), name_to_atom.get(inverse[names2[1]]))
+            if a_i is None or a_j is None:
+                continue
+            self._require_charmm_for_forming(psf, "bond")
+            bond = self._find_or_create_forming(psf.bonds, pm.Bond, pm.BondType, a_i, a_j, lig2_bond.type)
+            modified_k = f * lig2_bond.type.k
+            bond.mod_type = mod_type(modified_k, lig2_bond.type.req)
+            logger.info(
+                f"Forming bond {a_i.name}-{a_j.name}: k 0 -> {modified_k} "
+                f"(target {lig2_bond.type.k}, lambda={lambda_value})"
+            )
+
+    def _form_missing_angles(self, psf, lambda_value, mod_type):
+        """Insert/ramp cc2 angles that have no counterpart in cc1."""
+        inverse = self._inverse_atom_mapping()
+        name_to_atom = self._cc_atoms_by_name(psf)
+        existing = {
+            tuple(sorted((a.atom1.name, a.atom2.name, a.atom3.name)))
+            for a in psf.view[f":{self.tlc_cc1}"].angles
+            if not getattr(a, "_tf_forming", False)
+        }
+        f = 1.0 - lambda_value
+        for lig2_angle in self.ligand2_psf.angles:
+            names2 = (lig2_angle.atom1.name, lig2_angle.atom2.name, lig2_angle.atom3.name)
+            if not self._cc2_names_in_cc(names2, inverse):
+                continue
+            cc1_names = tuple(sorted(inverse[n] for n in names2))
+            if cc1_names in existing:
+                continue
+            atoms = [name_to_atom.get(inverse[n]) for n in names2]
+            if any(a is None for a in atoms):
+                continue
+            self._require_charmm_for_forming(psf, "angle")
+            angle = self._find_or_create_forming(
+                psf.angles, pm.Angle, pm.AngleType, atoms[0], atoms[1], lig2_angle.type, atoms[2]
+            )
+            modified_k = f * lig2_angle.type.k
+            angle.mod_type = mod_type(modified_k, lig2_angle.type.theteq)
+            logger.info(
+                f"Forming angle {atoms[0].name}-{atoms[1].name}-{atoms[2].name}: "
+                f"k 0 -> {modified_k} (lambda={lambda_value})"
+            )
+
+    def _form_missing_torsions(self, psf, lambda_value, mod_type):
+        """Insert/ramp cc2 torsions that have no counterpart in cc1.
+
+        Uses the same sequenced 'come on over the second half of lambda' factor
+        as the matched-torsion cc2 side (`f = 1 - min(lambda*2, 1)`).
+        """
+        inverse = self._inverse_atom_mapping()
+        name_to_atom = self._cc_atoms_by_name(psf)
+        existing = {
+            tuple(sorted((d.atom1.name, d.atom2.name, d.atom3.name, d.atom4.name)))
+            for d in psf.view[f":{self.tlc_cc1}"].dihedrals
+            if not getattr(d, "_tf_forming", False)
+        }
+        f = 1.0 - min(lambda_value * 2, 1.0)
+        for lig2_tor in self.ligand2_psf.dihedrals:
+            names2 = (
+                lig2_tor.atom1.name,
+                lig2_tor.atom2.name,
+                lig2_tor.atom3.name,
+                lig2_tor.atom4.name,
+            )
+            if not self._cc2_names_in_cc(names2, inverse):
+                continue
+            cc1_names = tuple(sorted(inverse[n] for n in names2))
+            if cc1_names in existing:
+                continue
+            atoms = [name_to_atom.get(inverse[n]) for n in names2]
+            if any(a is None for a in atoms):
+                continue
+            self._require_charmm_for_forming(psf, "torsion")
+            if type(lig2_tor.type) == pm.topologyobjects.DihedralType:
+                lig2_types = [lig2_tor.type]
+            else:
+                lig2_types = lig2_tor.type
+            tor = self._find_or_create_forming_dihedral(psf, atoms, lig2_types)
+            mod_types = [mod_type(t.phi_k * f, t.per, t.phase, t.scee, t.scnb) for t in lig2_types if f > 0.0]
+            tor.mod_type = mod_types
+            logger.info(
+                f"Forming torsion {atoms[0].name}-{atoms[1].name}-{atoms[2].name}-"
+                f"{atoms[3].name}: phi_k factor {f} (lambda={lambda_value})"
+            )
+
+    def _require_charmm_for_forming(self, psf, term):
+        if type(psf) == pm.amber.AmberParm:
+            raise NotImplementedError(
+                f"Forming a {term} on an Amber/GAFF topology is not implemented yet "
+                "(needs psf.remake_parm + exclusion-list rebuild). Use the CHARMM "
+                "force field for bond-migrating mutations for now. "
+                "See DESIGN_pseudouridine.md Phase 1b, step 5."
+            )
+
+    @staticmethod
+    def _find_or_create_forming(container, cls, type_cls, a1, a2, template_type, a3=None):
+        """Find a previously-inserted forming bond/angle between the given atoms,
+        or create one (marked ``_tf_forming``) and append it to ``container``."""
+        target = {id(a1), id(a2)} | ({id(a3)} if a3 is not None else set())
+        for term in container:
+            if not getattr(term, "_tf_forming", False):
+                continue
+            atoms = {id(term.atom1), id(term.atom2)}
+            if a3 is not None:
+                atoms |= {id(term.atom3)}
+            if atoms == target:
+                return term
+        if a3 is None:
+            new_type = type_cls(template_type.k, template_type.req)
+            term = cls(a1, a2, type=new_type)
+        else:
+            new_type = type_cls(template_type.k, template_type.theteq)
+            term = cls(a1, a2, a3, type=new_type)
+        term._tf_forming = True
+        container.append(term)
+        return term
+
+    @staticmethod
+    def _find_or_create_forming_dihedral(psf, atoms, template_types):
+        a1, a2, a3, a4 = atoms
+        target = [id(a1), id(a2), id(a3), id(a4)]
+        for d in psf.dihedrals:
+            if not getattr(d, "_tf_forming", False):
+                continue
+            if [id(d.atom1), id(d.atom2), id(d.atom3), id(d.atom4)] == target:
+                return d
+        t0 = template_types[0]
+        new_type = pm.DihedralType(t0.phi_k, t0.per, t0.phase, t0.scee, t0.scnb)
+        d = pm.Dihedral(a1, a2, a3, a4, type=new_type)
+        d._tf_forming = True
+        psf.dihedrals.append(d)
+        return d
 
     def mutate(self, psf: pm.charmm.CharmmPsfFile, lambda_value: float):
         """

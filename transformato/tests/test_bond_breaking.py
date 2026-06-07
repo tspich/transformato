@@ -40,10 +40,14 @@ class _Angle:
 
 
 class _View:
-    def __init__(self, bonds=(), angles=(), dihedrals=()):
+    def __init__(self, bonds=(), angles=(), dihedrals=(), atoms=()):
         self.bonds = list(bonds)
         self.angles = list(angles)
         self.dihedrals = list(dihedrals)
+        # the forming pass (also gated by allow_bonded_breaking) inspects
+        # view.atoms; for these breaking-only tests the ligand2 template has no
+        # bonds, so nothing is formed -- an empty atom list is enough.
+        self.atoms = list(atoms)
 
 
 class _Psf:
