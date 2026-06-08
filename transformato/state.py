@@ -246,7 +246,15 @@ class IntermediateStateFactory(object):
         """
         Prepends the preamble of the selected workload manager in the file specified by filepath
 
-        The preamble is the *-preamble.sh file found in transformato/bin
+        The preamble source is, in order of precedence:
+
+        1. ``configuration["simulation"]["cluster-preamble"]`` if present. This is
+           either an inline preamble block (a multi-line string, used verbatim) or
+           a path to a preamble file (``~`` and env vars expanded). Use this to
+           express cluster-specific directives such as ``#SBATCH --qos=...`` /
+           ``--account=...`` without editing the bundled defaults.
+        2. otherwise the bundled ``{workload-manager}-preamble.sh`` in
+           ``transformato/bin`` (the previous, hard-coded behaviour).
 
         Args:
             filepath (str): Path to the file (usually _script_target)
@@ -254,10 +262,28 @@ class IntermediateStateFactory(object):
         """
 
         workloadmanager = self.configuration["simulation"]["workload-manager"]
-        with open(
-            f"{self.configuration['bin_dir']}/{workloadmanager}-preamble.sh", "r"
-        ) as preamblefile:
-            preamble = preamblefile.read()
+
+        preamble = None
+        try:
+            custom = self.configuration["simulation"]["cluster-preamble"]
+        except KeyError:
+            custom = None
+
+        if custom:
+            candidate = os.path.expanduser(os.path.expandvars(str(custom).strip()))
+            # Treat as a file path only if it resolves to an existing file;
+            # otherwise use the value as an inline preamble block.
+            if os.path.isfile(candidate):
+                with open(candidate, "r") as preamblefile:
+                    preamble = preamblefile.read()
+            else:
+                preamble = str(custom)
+
+        if preamble is None:
+            with open(
+                f"{self.configuration['bin_dir']}/{workloadmanager}-preamble.sh", "r"
+            ) as preamblefile:
+                preamble = preamblefile.read()
 
         with open(filepath, "r+") as script_to_prepend_to:
             content = script_to_prepend_to.read()
