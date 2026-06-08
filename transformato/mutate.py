@@ -700,6 +700,71 @@ class ProposeMutationRoute(object):
         logger.info(f"common core mol1: {cc1}")
         logger.info(f"common core mol2: {cc2}")
 
+    def set_common_core_mapping_by_name(
+        self,
+        exclude_mol1=(),
+        exclude_mol2=(),
+        allow_bonded_topology_change: bool = True,
+    ):
+        """
+        Build the common-core mapping from **matching atom names** (an atom in
+        mol1 maps to the atom in mol2 with the same name), then hand it to
+        ``set_common_core_mapping``.
+
+        This is the convenient entry point for uridine <-> pseudouridine: CHARMM
+        keeps identical atom names for every shared atom, so the only atoms to
+        exclude are the swapped hydrogens -- ``H5`` (uridine, on C5) and ``H1``
+        (pseudouridine, on N1). The migrating glycosidic bond (``C1'-N1`` vs
+        ``C1'-C5``) and all the atom-type changes are then handled by the
+        forming/breaking machinery. See ``DESIGN_pseudouridine.md``.
+
+            route.set_common_core_mapping_by_name(
+                exclude_mol1=["H5"], exclude_mol2=["H1"]
+            )
+
+        Parameters
+        ----------
+        exclude_mol1, exclude_mol2 : iterable[str]
+            Atom names to leave OUT of the common core (the dummy atoms) on each
+            side, e.g. the hydrogen that the other tautomer/isomer does not have.
+        allow_bonded_topology_change : bool, default True
+            Forwarded to ``set_common_core_mapping`` (enables bond forming/breaking).
+        """
+        if self.asfe:
+            raise RuntimeError("set_common_core_mapping_by_name needs two structures (not ASFE).")
+
+        exclude_mol1 = set(exclude_mol1)
+        exclude_mol2 = set(exclude_mol2)
+
+        # atom names in psf/mol order (transformato assumes mol order == psf order)
+        names1 = [atom.name for atom in self.psfs["m1"].atoms]
+        names2 = [atom.name for atom in self.psfs["m2"].atoms]
+        name_to_idx2 = {}
+        for idx, name in enumerate(names2):
+            name_to_idx2.setdefault(name, idx)  # first occurrence wins
+
+        mapping = []
+        unmatched = []
+        for idx1, name in enumerate(names1):
+            if name in exclude_mol1:
+                continue
+            if name in exclude_mol2:
+                continue
+            if name in name_to_idx2:
+                mapping.append((idx1, name_to_idx2[name]))
+            else:
+                unmatched.append(name)
+
+        if unmatched:
+            logger.warning(
+                f"set_common_core_mapping_by_name: {len(unmatched)} mol1 atom name(s) "
+                f"had no mol2 match and were left out of the common core: {unmatched}. "
+                "If these are not intended dummies, pass them via exclude_mol1 or use "
+                "set_common_core_mapping with an explicit index map."
+            )
+
+        self.set_common_core_mapping(mapping, allow_bonded_topology_change=allow_bonded_topology_change)
+
     def finish_common_core(
         self,
         connected_dummy_regions_cc1: list = [],

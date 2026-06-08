@@ -9,12 +9,12 @@ uridine (U) and pseudouridine (Ψ), and more generally any mutation where a bond
 
 | Phase | What | State |
 |---|---|---|
-| 0 | Explicit common-core atom mapping (bypass MCS) | **done** — `ProposeMutationRoute.set_common_core_mapping`; tests in `tests/test_common_core_mapping.py` |
+| 0 | Explicit common-core atom mapping (bypass MCS) | **done** — `set_common_core_mapping` (index map) + `set_common_core_mapping_by_name` (name map, ideal for U↔Ψ); tests in `tests/test_common_core_mapping.py`, `tests/test_psu_uridine_migration.py` |
 | 1a | Graceful bonded-term **breaking** (k→0 when no counterpart), gated by `allow_bonded_topology_change` | **done** — `_mutate_bonds/_angles/_torsions`; tests in `tests/test_bond_breaking.py` |
 | 1b | Bonded-term **forming** (insert a bond present only in the other ligand) | **done for CHARMM** — `_form_missing_bonds/_angles/_torsions`; Amber raises `NotImplementedError`; tests in `tests/test_bond_forming.py` |
 | 2 | Shared-endstate accounting / cycle closure | spec'd in §4 Phase 2 (architecture noted); test not written |
 | 3 | Geometry & sampling safeguards | partial — schedule chosen (see 1b note); restraint not yet built |
-| 4 | Validation on a nucleoside | not started — needs a Ψ/U test system; logic unit-tested, end-to-end not yet |
+| 4 | Validation on a nucleoside | **scaffold ready** — `transfo_test/psu_nucleoside/`: `prepare_charmm_inputs.py` (build waterbox from two nucleoside PDBs via macha; vacuum derived by transformato), `setup_psu.py` (driver), `config.template.yaml`, `README.md`; verified U↔Ψ mapping (identity by name minus H5/H1); realistic migration test `tests/test_psu_uridine_migration.py`. Needs the two nucleoside PDBs to run end-to-end + cycle closure |
 
 **Phase 1b implementation notes (2026-06-07).**
 - Forming is gated by the same `allow_bonded_breaking` /
