@@ -237,6 +237,12 @@ class SystemStructure(object):
         parameter_files += (f"{toppar_dir}/par_all36m_prot.prm",)
         parameter_files += (f"{toppar_dir}/par_all36_na.prm",)
         parameter_files += (f"{toppar_dir}/top_all36_na.rtf",)
+        # modified nucleic-acid residues (e.g. pseudouridine / RESI PSU and the
+        # C-glycosidic CG2R62-CN7B bond). Additive: its standard entries are
+        # copied verbatim "from NA36", so loading it does not change canonical
+        # NA systems; only loaded if the bundled stream is present.
+        if os.path.isfile(f"{toppar_dir}/toppar_all36_na_rna_modified.str"):
+            parameter_files += (f"{toppar_dir}/toppar_all36_na_rna_modified.str",)
         parameter_files += (f"{toppar_dir}/top_all36_cgenff.rtf",)
         parameter_files += (f"{toppar_dir}/par_all36_cgenff.prm",)
         parameter_files += (f"{toppar_dir}/par_all36_lipid.prm",)
