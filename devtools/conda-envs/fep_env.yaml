@@ -20,6 +20,8 @@ dependencies:
   - tqdm
   - pip
   - seaborn
+  - openbabel
+  - natsort
     # Testing
   - pytest
   - pytest-cov
