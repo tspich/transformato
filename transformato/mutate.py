@@ -2110,22 +2110,26 @@ class CommonCoreTransformation(object):
                 # over the second half of lambda (full at 1, zero at <=0.5), the
                 # same schedule used for the cc1 side of a matched torsion.
                 f = max((1 - ((1 - lambda_value) * 2)), 0.0)
+                # Always emit a parameter line (phi_k scaled by f, which reaches 0 once
+                # the breaking bond's torsions have fully ramped off in the second half
+                # of lambda). The torsion stays in the psf topology, so an empty list
+                # would leave it paramless and OpenMM raises MissingParameter; a phi_k=0
+                # term is energetically inert.
                 mod_types = []
-                if f > 0.0:
-                    if type(original_torsion.type) == pm.topologyobjects.DihedralType:
-                        orig_torsion_as_list = [original_torsion.type]
-                    else:
-                        orig_torsion_as_list = original_torsion.type
-                    for torsion_t in orig_torsion_as_list:
-                        mod_types.append(
-                            mod_type(
-                                torsion_t.phi_k * f,
-                                torsion_t.per,
-                                torsion_t.phase,
-                                torsion_t.scee,
-                                torsion_t.scnb,
-                            )
+                if type(original_torsion.type) == pm.topologyobjects.DihedralType:
+                    orig_torsion_as_list = [original_torsion.type]
+                else:
+                    orig_torsion_as_list = original_torsion.type
+                for torsion_t in orig_torsion_as_list:
+                    mod_types.append(
+                        mod_type(
+                            torsion_t.phi_k * f,
+                            torsion_t.per,
+                            torsion_t.phase,
+                            torsion_t.scee,
+                            torsion_t.scnb,
                         )
+                    )
                 logger.info(
                     f"Breaking torsion {original_atom1_name}-{original_atom2_name}-"
                     f"{original_atom3_name}-{original_atom4_name}: phi_k factor {f} "
@@ -2256,7 +2260,11 @@ class CommonCoreTransformation(object):
             else:
                 lig2_types = lig2_tor.type
             tor = self._find_or_create_forming_dihedral(psf, atoms, lig2_types)
-            mod_types = [mod_type(t.phi_k * f, t.per, t.phase, t.scee, t.scnb) for t in lig2_types if f > 0.0]
+            # Always emit a parameter line (phi_k scaled by f, which is 0 in the first
+            # half of lambda). The dihedral is created in the psf topology above
+            # unconditionally, so an empty list would leave a paramless dihedral and
+            # OpenMM raises MissingParameter. A phi_k=0 term is energetically inert.
+            mod_types = [mod_type(t.phi_k * f, t.per, t.phase, t.scee, t.scnb) for t in lig2_types]
             tor.mod_type = mod_types
             logger.info(
                 f"Forming torsion {atoms[0].name}-{atoms[1].name}-{atoms[2].name}-"
