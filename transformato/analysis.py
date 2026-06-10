@@ -354,7 +354,16 @@ class FreeEnergyCalculator(object):
             start += N_k[env][d]
 
         logger.debug("#######################################")
-        return mbar.MBAR(u_kn, N_k[env], initialize="BAR", verbose=True)
+        # NOTE: do NOT use initialize="BAR" here. The BAR pre-solve (pymbar 3.x
+        # _initialize_with_bar) raises BoundsError when an adjacent pair has
+        # near-zero overlap, and pymbar's own recovery handler then crashes with
+        # `NameError: name 'ConvergenceError' is not defined` (the name isn't
+        # imported in mbar.py), masking the real error. The migration's break/form
+        # window in vacuum hits exactly this poor-overlap case. "zeros" (pymbar's
+        # default) skips that path; the self-consistent solver converges from a
+        # zero guess and, importantly, lets the run finish so the overlap matrix
+        # is emitted for diagnosis.
+        return mbar.MBAR(u_kn, N_k[env], initialize="zeros", verbose=True)
 
     def _evaluate_traj_with_CHARMM(
         self, path: str, env: str, volumn_list: list = []
