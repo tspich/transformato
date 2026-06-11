@@ -2188,10 +2188,20 @@ class CommonCoreTransformation(object):
             self._require_charmm_for_forming(psf, "bond")
             bond = self._find_or_create_forming(psf.bonds, pm.Bond, pm.BondType, a_i, a_j, lig2_bond.type)
             modified_k = f * lig2_bond.type.k
-            bond.mod_type = mod_type(modified_k, lig2_bond.type.req)
+            # Ramp the equilibrium length too, not just k. The forming atoms can start far
+            # apart (e.g. C1'-C5 ~3.6 A in uridine while the target is ~1.5 A); pinning req
+            # at the target makes 1/2 k (r-r0)^2 enormous even at small ramped k, so the
+            # state has ~zero overlap with its neighbour (the +200 kT migration seam). Walk
+            # req from the measured initial separation (lambda=1) to the cc2 target (lambda=0)
+            # in lockstep, so the bond is near-satisfied at every window and gently pulls the
+            # atoms together as it strengthens.
+            r_init = self._initial_distance(a_i, a_j, lig2_bond.type.req)
+            modified_req = lambda_value * r_init + (1.0 - lambda_value) * lig2_bond.type.req
+            bond.mod_type = mod_type(modified_k, modified_req)
             logger.info(
                 f"Forming bond {a_i.name}-{a_j.name}: k 0 -> {modified_k} "
-                f"(target {lig2_bond.type.k}, lambda={lambda_value})"
+                f"(target k {lig2_bond.type.k}), req {r_init:.3f} -> {modified_req:.3f} "
+                f"(target {lig2_bond.type.req:.3f}, lambda={lambda_value})"
             )
 
     def _form_missing_angles(self, psf, lambda_value, mod_type):
@@ -2219,10 +2229,16 @@ class CommonCoreTransformation(object):
                 psf.angles, pm.Angle, pm.AngleType, atoms[0], atoms[1], lig2_angle.type, atoms[2]
             )
             modified_k = f * lig2_angle.type.k
-            angle.mod_type = mod_type(modified_k, lig2_angle.type.theteq)
+            # Same reasoning as the forming bond: ramp the equilibrium angle from the
+            # measured initial geometry to the cc2 target so the forming angle is not
+            # pre-strained on the early-transform geometry.
+            theta_init = self._initial_angle(atoms[0], atoms[1], atoms[2], lig2_angle.type.theteq)
+            modified_theteq = lambda_value * theta_init + (1.0 - lambda_value) * lig2_angle.type.theteq
+            angle.mod_type = mod_type(modified_k, modified_theteq)
             logger.info(
                 f"Forming angle {atoms[0].name}-{atoms[1].name}-{atoms[2].name}: "
-                f"k 0 -> {modified_k} (lambda={lambda_value})"
+                f"k 0 -> {modified_k}, theteq {theta_init:.1f} -> {modified_theteq:.1f} "
+                f"(target {lig2_angle.type.theteq:.1f}, lambda={lambda_value})"
             )
 
     def _form_missing_torsions(self, psf, lambda_value, mod_type):
@@ -2302,6 +2318,49 @@ class CommonCoreTransformation(object):
         term._tf_forming = True
         container.append(term)
         return term
+
+    @staticmethod
+    def _atom_xyz(atom):
+        """Cartesian position (Angstrom) of a parmed atom from the loaded coordinates."""
+        return np.array([atom.xx, atom.xy, atom.xz], dtype=float)
+
+    @classmethod
+    def _initial_distance(cls, a_i, a_j, fallback):
+        """Measured separation (A) of a forming bond's atoms in the input geometry.
+
+        Used as the lambda=1 equilibrium length so the forming bond starts slack rather
+        than pre-stretched to its cc2 target. Falls back to ``fallback`` (the target req)
+        if coordinates are unavailable -- i.e. the previous behaviour, no worse than before.
+        """
+        try:
+            d = float(np.linalg.norm(cls._atom_xyz(a_i) - cls._atom_xyz(a_j)))
+            if np.isfinite(d) and d > 0.0:
+                return d
+        except (AttributeError, TypeError):
+            pass
+        logger.warning(
+            "Forming bond: no coordinates to measure initial length; falling back to the "
+            "target req (overlap across the forming seam may stay poor)."
+        )
+        return fallback
+
+    @classmethod
+    def _initial_angle(cls, a1, a2, a3, fallback):
+        """Measured a1-a2-a3 angle (degrees) in the input geometry; fallback = target."""
+        try:
+            v1 = cls._atom_xyz(a1) - cls._atom_xyz(a2)
+            v2 = cls._atom_xyz(a3) - cls._atom_xyz(a2)
+            denom = np.linalg.norm(v1) * np.linalg.norm(v2)
+            if denom > 0.0:
+                ang = np.degrees(np.arccos(np.clip(np.dot(v1, v2) / denom, -1.0, 1.0)))
+                if np.isfinite(ang):
+                    return float(ang)
+        except (AttributeError, TypeError):
+            pass
+        logger.warning(
+            "Forming angle: no coordinates to measure initial angle; falling back to target."
+        )
+        return fallback
 
     @staticmethod
     def _find_or_create_forming_dihedral(psf, atoms, template_types):

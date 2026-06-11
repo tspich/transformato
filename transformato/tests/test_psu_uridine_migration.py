@@ -16,6 +16,7 @@ This runs on hand-built parmed Structures (no CHARMM-GUI inputs needed); the
 end-to-end run on a solvated/vacuum nucleoside is the remaining Phase 4 step.
 """
 
+import numpy as np
 import parmed as pm
 import pytest
 
@@ -83,7 +84,7 @@ PSU_BONDS = [
 PSU_ANGLES = [("C1'", "C5", "C4"), ("C1'", "C5", "C6"), ("N1", "C2", "O2")]
 
 
-def _build(atoms, bonds, angles, dihedrals=(), resname="LIG", k_bond=300.0, k_ang=50.0, phi_k=2.0):
+def _build(atoms, bonds, angles, dihedrals=(), resname="LIG", k_bond=300.0, k_ang=50.0, phi_k=2.0, coords=None):
     s = pm.Structure()
     at = {}
     for name, typ in atoms:
@@ -102,6 +103,8 @@ def _build(atoms, bonds, angles, dihedrals=(), resname="LIG", k_bond=300.0, k_an
         dt = pm.DihedralType(phi_k, 2, 180.0, 1.2, 2.0)
         s.dihedral_types.append(dt)
         s.dihedrals.append(pm.Dihedral(at[n1], at[n2], at[n3], at[n4], type=dt))
+    if coords is not None:
+        s.coordinates = np.array([coords[name] for name, _ in atoms], dtype=float)
     return s
 
 
@@ -248,3 +251,41 @@ def test_junction_torsions_always_carry_a_parameter():
     assert max(t.phi_k for t in _torsion(ura, ["O2", "C2", "N1", "C1'"]).mod_type) == pytest.approx(0.0)
     # ...and the forming torsion is fully on (its cc2 phi_k)
     assert max(t.phi_k for t in _torsion(ura, ["C1'", "C5", "C4", "O4"]).mod_type) == pytest.approx(2.0)
+
+
+def test_forming_bond_req_ramps_from_initial_geometry():
+    """Regression: the forming bond's equilibrium length must ramp from the *measured
+    initial geometry* to the cc2 target -- not jump to the target on lambda 1.
+
+    Pinning req at the target (1.45 A) while the forming atoms start far apart (here C1'
+    and C5 are 3.6 A apart) makes 1/2 k (r-r0)^2 enormous and gives the first transform
+    state ~zero overlap with the decoupling endstate -- the +200 kT migration seam the
+    energy decomposition pinned on this exact bond. With the fix, req at lambda=1 equals
+    the initial separation (slack bond), then walks linearly to the target at lambda=0.
+    """
+    # only C1' and C5 positions matter for the forming-bond distance; space the rest out
+    coords = {name: (5.0 + 2.0 * i, 0.0, 0.0) for i, (name, _) in enumerate(URA_ATOMS)}
+    coords["C1'"] = (0.0, 0.0, 0.0)
+    coords["C5"] = (3.6, 0.0, 0.0)
+    ura = _build(URA_ATOMS, URA_BONDS, [], coords=coords)
+    psu = _build(PSU_ATOMS, PSU_BONDS, [])  # provides the forming C1'-C5 target (req 1.45)
+    cct = _make_cct(ura, psu)
+
+    r_init, target = 3.6, 1.45  # 3.6 A initial separation; _build's BondType req = 1.45
+
+    cct._mutate_bonds(ura, 1.0)
+    formed = _bond(ura, "C1'", "C5")
+    assert getattr(formed, "_tf_forming", False)
+    assert formed.mod_type.req == pytest.approx(r_init, abs=1e-6)  # slack at the start
+
+    cct._mutate_bonds(ura, 0.5)
+    assert _bond(ura, "C1'", "C5").mod_type.req == pytest.approx(0.5 * r_init + 0.5 * target)
+
+    cct._mutate_bonds(ura, 0.0)
+    assert _bond(ura, "C1'", "C5").mod_type.req == pytest.approx(target)  # cc2 target at the end
+
+    # and without coordinates the helper falls back to the target (no worse than before)
+    ura_nc = _build(URA_ATOMS, URA_BONDS, [])
+    cct_nc = _make_cct(ura_nc, _build(PSU_ATOMS, PSU_BONDS, []))
+    cct_nc._mutate_bonds(ura_nc, 1.0)
+    assert _bond(ura_nc, "C1'", "C5").mod_type.req == pytest.approx(target)
