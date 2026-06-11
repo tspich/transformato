@@ -347,9 +347,20 @@ class FreeEnergyCalculator(object):
         for d in range(u_kn.shape[0] - 1):
             nr_of_snapshots = N_k[env][d] + N_k[env][d + 1]
             u_kn_ = u_kn[d : d + 2 :, start : start + nr_of_snapshots]
-            m = mbar.MBAR(u_kn_, N_k[env][d : d + 2])
-            logger.debug(_mbar_free_energy_differences(m)["Delta_f"][0, 1])
-            logger.debug(_mbar_free_energy_differences(m)["dDelta_f"][0, 1])
+            # This pairwise estimate is logged for debugging only. When an adjacent
+            # pair has (numerically) zero overlap, pymbar's check_w_normalized raises
+            # a ParameterError inside compute_free_energy_differences. Do NOT let a
+            # debug log line abort the whole analysis before the full MBAR object and
+            # the overlap matrix (which does not need that check) can be produced.
+            try:
+                m = mbar.MBAR(u_kn_, N_k[env][d : d + 2])
+                logger.debug(_mbar_free_energy_differences(m)["Delta_f"][0, 1])
+                logger.debug(_mbar_free_energy_differences(m)["dDelta_f"][0, 1])
+            except Exception as e:
+                logger.warning(
+                    f"Pairwise MBAR for adjacent states {d}-{d + 1} in {env} failed "
+                    f"(almost certainly zero phase-space overlap): {e}"
+                )
 
             start += N_k[env][d]
 
