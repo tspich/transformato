@@ -253,38 +253,55 @@ def test_junction_torsions_always_carry_a_parameter():
     assert max(t.phi_k for t in _torsion(ura, ["C1'", "C5", "C4", "O4"]).mod_type) == pytest.approx(2.0)
 
 
-def test_forming_bond_req_ramps_from_initial_geometry():
-    """Regression: the forming bond's equilibrium length must ramp from the *measured
-    initial geometry* to the cc2 target -- not jump to the target on lambda 1.
+def test_forming_bond_sequences_geometry_ahead_of_stiffness():
+    """Regression: the forming bond must POSITION before it STIFFENS.
 
-    Pinning req at the target (1.45 A) while the forming atoms start far apart (here C1'
-    and C5 are 3.6 A apart) makes 1/2 k (r-r0)^2 enormous and gives the first transform
-    state ~zero overlap with the decoupling endstate -- the +200 kT migration seam the
-    energy decomposition pinned on this exact bond. With the fix, req at lambda=1 equals
-    the initial separation (slack bond), then walks linearly to the target at lambda=0.
+    Ramping req and k together (linearly) left, in the back half of the transform, a stiff
+    spring whose rest length was still moving -- every window pinned to a distinct geometry
+    and adjacent MBAR overlap collapsed (uridine states 11..22 overlapped < 0.03 down to 0).
+    The sequenced schedule walks req from the measured initial separation (C1'-C5 = 3.6 A
+    here) to the cc2 target (1.45 A) while k is soft, reaching the target by the positioning
+    fraction (default lambda=0.5); only then does k climb to full, with req fixed. So req
+    LEADS k: at lambda=0.5 req is already at target while k is still only ~K_SOFT of full.
     """
-    # only C1' and C5 positions matter for the forming-bond distance; space the rest out
     coords = {name: (5.0 + 2.0 * i, 0.0, 0.0) for i, (name, _) in enumerate(URA_ATOMS)}
     coords["C1'"] = (0.0, 0.0, 0.0)
     coords["C5"] = (3.6, 0.0, 0.0)
     ura = _build(URA_ATOMS, URA_BONDS, [], coords=coords)
-    psu = _build(PSU_ATOMS, PSU_BONDS, [])  # provides the forming C1'-C5 target (req 1.45)
+    psu = _build(PSU_ATOMS, PSU_BONDS, [])  # provides the forming C1'-C5 target (req 1.45, k 300)
     cct = _make_cct(ura, psu)
 
-    r_init, target = 3.6, 1.45  # 3.6 A initial separation; _build's BondType req = 1.45
+    r_init, target, k_full = 3.6, 1.45, 300.0
+    k_soft = CommonCoreTransformation._FORMING_K_SOFT       # 0.1
+    assert CommonCoreTransformation._FORMING_REQ_FRACTION == pytest.approx(0.5)
 
-    cct._mutate_bonds(ura, 1.0)
-    formed = _bond(ura, "C1'", "C5")
-    assert getattr(formed, "_tf_forming", False)
-    assert formed.mod_type.req == pytest.approx(r_init, abs=1e-6)  # slack at the start
+    def fb(lam):
+        cct._mutate_bonds(ura, lam)
+        return _bond(ura, "C1'", "C5").mod_type
 
-    cct._mutate_bonds(ura, 0.5)
-    assert _bond(ura, "C1'", "C5").mod_type.req == pytest.approx(0.5 * r_init + 0.5 * target)
+    # lambda=1.0 (cc1 endstate): bond essentially absent -- req at the start, k ~0
+    m = fb(1.0)
+    assert getattr(_bond(ura, "C1'", "C5"), "_tf_forming", False)
+    assert m.req == pytest.approx(r_init, abs=1e-6)
+    assert m.k == pytest.approx(0.0, abs=1e-6)
 
-    cct._mutate_bonds(ura, 0.0)
-    assert _bond(ura, "C1'", "C5").mod_type.req == pytest.approx(target)  # cc2 target at the end
+    # halfway through positioning (p=0.25 -> lambda=0.75): req half-walked, k still tiny
+    m = fb(0.75)
+    assert m.req == pytest.approx(0.5 * r_init + 0.5 * target)
+    assert m.k == pytest.approx(k_soft * 0.5 * k_full)        # 15.0
 
-    # and without coordinates the helper falls back to the target (no worse than before)
+    # end of positioning (p=0.5 -> lambda=0.5): req AT target, k only soft -> req leads k
+    m = fb(0.5)
+    assert m.req == pytest.approx(target)
+    assert m.k == pytest.approx(k_soft * k_full)             # 30.0
+    assert m.k < 0.2 * k_full                                 # k clearly lags req here
+
+    # common core (lambda=0.0): req at target, k full
+    m = fb(0.0)
+    assert m.req == pytest.approx(target)
+    assert m.k == pytest.approx(k_full)
+
+    # no coordinates -> req falls back to the target throughout (k schedule still applies)
     ura_nc = _build(URA_ATOMS, URA_BONDS, [])
     cct_nc = _make_cct(ura_nc, _build(PSU_ATOMS, PSU_BONDS, []))
     cct_nc._mutate_bonds(ura_nc, 1.0)

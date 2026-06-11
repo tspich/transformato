@@ -2173,8 +2173,6 @@ class CommonCoreTransformation(object):
             for b in psf.view[f":{self.tlc_cc1}"].bonds
             if not getattr(b, "_tf_forming", False)
         }
-        # forming ramps on over lambda: 0 at lambda=1 (cc1), full at lambda=0 (cc)
-        f = 1.0 - lambda_value
         for lig2_bond in self.ligand2_psf.bonds:
             names2 = (lig2_bond.atom1.name, lig2_bond.atom2.name)
             if not self._cc2_names_in_cc(names2, inverse):
@@ -2187,20 +2185,18 @@ class CommonCoreTransformation(object):
                 continue
             self._require_charmm_for_forming(psf, "bond")
             bond = self._find_or_create_forming(psf.bonds, pm.Bond, pm.BondType, a_i, a_j, lig2_bond.type)
-            modified_k = f * lig2_bond.type.k
-            # Ramp the equilibrium length too, not just k. The forming atoms can start far
-            # apart (e.g. C1'-C5 ~3.6 A in uridine while the target is ~1.5 A); pinning req
-            # at the target makes 1/2 k (r-r0)^2 enormous even at small ramped k, so the
-            # state has ~zero overlap with its neighbour (the +200 kT migration seam). Walk
-            # req from the measured initial separation (lambda=1) to the cc2 target (lambda=0)
-            # in lockstep, so the bond is near-satisfied at every window and gently pulls the
-            # atoms together as it strengthens.
+            # Sequenced schedule (see _forming_schedule): walk req from the measured initial
+            # separation to the cc2 target while the bond is soft, then stiffen k with req
+            # already at target. The forming atoms can start far apart (C1'-C5 ~3.6 A in
+            # uridine vs a ~1.5 A target); a stiff spring with a moving rest length gives
+            # ~zero overlap in the back half of the transform.
             r_init = self._initial_distance(a_i, a_j, lig2_bond.type.req)
-            modified_req = lambda_value * r_init + (1.0 - lambda_value) * lig2_bond.type.req
+            k_fraction, modified_req = self._forming_schedule(lambda_value, r_init, lig2_bond.type.req)
+            modified_k = k_fraction * lig2_bond.type.k
             bond.mod_type = mod_type(modified_k, modified_req)
             logger.info(
-                f"Forming bond {a_i.name}-{a_j.name}: k 0 -> {modified_k} "
-                f"(target k {lig2_bond.type.k}), req {r_init:.3f} -> {modified_req:.3f} "
+                f"Forming bond {a_i.name}-{a_j.name}: k {modified_k:.1f} "
+                f"({k_fraction:.2f} of {lig2_bond.type.k}), req {r_init:.3f} -> {modified_req:.3f} "
                 f"(target {lig2_bond.type.req:.3f}, lambda={lambda_value})"
             )
 
@@ -2213,7 +2209,6 @@ class CommonCoreTransformation(object):
             for a in psf.view[f":{self.tlc_cc1}"].angles
             if not getattr(a, "_tf_forming", False)
         }
-        f = 1.0 - lambda_value
         for lig2_angle in self.ligand2_psf.angles:
             names2 = (lig2_angle.atom1.name, lig2_angle.atom2.name, lig2_angle.atom3.name)
             if not self._cc2_names_in_cc(names2, inverse):
@@ -2228,16 +2223,18 @@ class CommonCoreTransformation(object):
             angle = self._find_or_create_forming(
                 psf.angles, pm.Angle, pm.AngleType, atoms[0], atoms[1], lig2_angle.type, atoms[2]
             )
-            modified_k = f * lig2_angle.type.k
-            # Same reasoning as the forming bond: ramp the equilibrium angle from the
-            # measured initial geometry to the cc2 target so the forming angle is not
-            # pre-strained on the early-transform geometry.
+            # Same sequenced schedule as the forming bond: ramp theteq to the cc2 target
+            # while the angle term is soft, then stiffen k with theteq already at target.
             theta_init = self._initial_angle(atoms[0], atoms[1], atoms[2], lig2_angle.type.theteq)
-            modified_theteq = lambda_value * theta_init + (1.0 - lambda_value) * lig2_angle.type.theteq
+            k_fraction, modified_theteq = self._forming_schedule(
+                lambda_value, theta_init, lig2_angle.type.theteq
+            )
+            modified_k = k_fraction * lig2_angle.type.k
             angle.mod_type = mod_type(modified_k, modified_theteq)
             logger.info(
                 f"Forming angle {atoms[0].name}-{atoms[1].name}-{atoms[2].name}: "
-                f"k 0 -> {modified_k}, theteq {theta_init:.1f} -> {modified_theteq:.1f} "
+                f"k {modified_k:.1f} ({k_fraction:.2f} of {lig2_angle.type.k}), "
+                f"theteq {theta_init:.1f} -> {modified_theteq:.1f} "
                 f"(target {lig2_angle.type.theteq:.1f}, lambda={lambda_value})"
             )
 
@@ -2318,6 +2315,42 @@ class CommonCoreTransformation(object):
         term._tf_forming = True
         container.append(term)
         return term
+
+    # --- forming-term schedule (bond/angle migration) ----------------------- #
+    # Sequence the equilibrium-geometry ramp AHEAD of the stiffness ramp. Ramping a forming
+    # bond's force constant k and equilibrium length req together (linearly) leaves, in the
+    # back half of the transform, a stiff spring whose rest length is still moving -- every
+    # window is pinned to a distinct geometry and adjacent MBAR overlap collapses (observed:
+    # uridine transform states 11..22 overlapped < 0.03 down to 0 at the common core).
+    # Instead: POSITION first (ramp req -> target while k is still soft, so the atoms are
+    # walked together cheaply), then STIFFEN (ramp k -> full with req already at target, so
+    # neighbouring windows differ only in stiffness on the same geometry). Tunable:
+    _FORMING_REQ_FRACTION = 0.5  # geometry (req/theteq) reaches the cc2 target by this
+    #                              fraction of the transform progress p = 1 - lambda
+    _FORMING_K_SOFT = 0.1        # k held to this fraction of full during the positioning phase
+
+    @classmethod
+    def _forming_schedule(cls, lambda_value, geom_init, geom_target):
+        """Sequenced (k_fraction, geom) for a forming bond/angle at ``lambda_value``.
+
+        p = 1 - lambda is transform progress (0 at cc1, 1 at the common core).
+          * positioning (p <= _FORMING_REQ_FRACTION): geom ramps geom_init -> geom_target,
+            k grows 0 -> _FORMING_K_SOFT * full.
+          * stiffening (p >  _FORMING_REQ_FRACTION): geom held at geom_target,
+            k grows _FORMING_K_SOFT * full -> full.
+        Endpoints are preserved: k_fraction = 0 at lambda=1, = 1 at lambda=0.
+        """
+        p = 1.0 - lambda_value
+        s = cls._FORMING_REQ_FRACTION
+        if s > 0.0 and p <= s:
+            frac = p / s
+            geom = (1.0 - frac) * geom_init + frac * geom_target
+            k_fraction = cls._FORMING_K_SOFT * frac
+        else:
+            geom = geom_target
+            frac = (p - s) / (1.0 - s) if s < 1.0 else 1.0
+            k_fraction = cls._FORMING_K_SOFT + (1.0 - cls._FORMING_K_SOFT) * frac
+        return k_fraction, geom
 
     @staticmethod
     def _atom_xyz(atom):

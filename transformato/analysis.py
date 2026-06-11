@@ -43,6 +43,28 @@ def _mbar_overlap(mbar_obj) -> dict:
     return mbar_obj.computeOverlap()  # pymbar 3
 
 
+# pymbar 4's default solver chain is ('hybr', 'adaptive'). On bonded-migration systems the
+# 'hybr' solver (scipy hybrid Powell with a JAX gradient) freezes at f_k=0 and pymbar 4.2
+# keeps that broken solution -- collapsed overlap and garbage free energies, even though the
+# data is fine (verified: pseudouridine converges identically under pymbar 3 and under
+# pymbar 4 with 'adaptive'). The 'adaptive' self-consistent solver is pymbar 3's default and
+# converges, so on pymbar 4 we force it. pymbar 3's MBAR takes no solver_protocol kwarg.
+try:
+    import importlib.metadata as _ilmd
+
+    _PYMBAR_MAJOR = int(_ilmd.version("pymbar").split(".")[0])
+except Exception:
+    _PYMBAR_MAJOR = 3
+
+
+def _build_mbar(u_kn, N_k, **kwargs):
+    """Construct a pymbar MBAR, forcing the 'adaptive' solver on pymbar >= 4 (its default
+    'hybr' solver fails on bonded-migration data). A no-op wrapper on pymbar 3."""
+    if _PYMBAR_MAJOR >= 4:
+        kwargs.setdefault("solver_protocol", ({"method": "adaptive"},))
+    return mbar.MBAR(u_kn, N_k, **kwargs)
+
+
 def return_reduced_potential(
     potential_energy: unit.Quantity,
     volume: unit.Quantity,
@@ -353,7 +375,7 @@ class FreeEnergyCalculator(object):
             # debug log line abort the whole analysis before the full MBAR object and
             # the overlap matrix (which does not need that check) can be produced.
             try:
-                m = mbar.MBAR(u_kn_, N_k[env][d : d + 2])
+                m = _build_mbar(u_kn_, N_k[env][d : d + 2])
                 logger.debug(_mbar_free_energy_differences(m)["Delta_f"][0, 1])
                 logger.debug(_mbar_free_energy_differences(m)["dDelta_f"][0, 1])
             except Exception as e:
@@ -374,7 +396,7 @@ class FreeEnergyCalculator(object):
         # default) skips that path; the self-consistent solver converges from a
         # zero guess and, importantly, lets the run finish so the overlap matrix
         # is emitted for diagnosis.
-        return mbar.MBAR(u_kn, N_k[env], initialize="zeros", verbose=True)
+        return _build_mbar(u_kn, N_k[env], initialize="zeros", verbose=True)
 
     def _evaluate_traj_with_CHARMM(
         self, path: str, env: str, volumn_list: list = []
@@ -757,8 +779,10 @@ class FreeEnergyCalculator(object):
     @staticmethod
     def _load_mbar_results(file: str):
         results = pickle.load(open(file, "rb"))
-        return mbar.MBAR(
-            results["u_kn"], results["N_k"], initialize="BAR", verbose=True
+        # initialize="zeros" (not "BAR"): the BAR pre-solve trips a pymbar 3.x NameError on
+        # near-zero-overlap pairs, and _build_mbar forces pymbar 4's working 'adaptive' solver.
+        return _build_mbar(
+            results["u_kn"], results["N_k"], initialize="zeros", verbose=True
         )
 
     def free_energy_differences(self, env="vacuum"):
