@@ -306,3 +306,30 @@ def test_forming_bond_sequences_geometry_ahead_of_stiffness():
     cct_nc = _make_cct(ura_nc, _build(PSU_ATOMS, PSU_BONDS, []))
     cct_nc._mutate_bonds(ura_nc, 1.0)
     assert _bond(ura_nc, "C1'", "C5").mod_type.req == pytest.approx(target)
+
+
+def test_breaking_bond_releases_by_positioning_fraction():
+    """Regression: the breaking bond must RELEASE early (front-loaded), reaching k=0 by the
+    positioning fraction (default lambda=0.5) -- not only at the common core.
+
+    Linear lambda*k kept the breaking C1'-N1 bond near full strength through the positioning
+    phase, pinning C1' on the N1 side until it abruptly let go (the (11,12) overlap gap), and
+    left a force-constant change at the final window (the (21,22) gap). Now it releases in
+    lockstep with the forming bond's req descent (and the breaking torsions), so it is fully
+    gone before the stiffening phase and before the common core.
+    """
+    ura = _build(URA_ATOMS, URA_BONDS, [])
+    psu = _build(PSU_ATOMS, PSU_BONDS, [])
+    cct = _make_cct(ura, psu)
+    k_full = 300.0  # _build's BondType k
+    s = CommonCoreTransformation._FORMING_REQ_FRACTION  # 0.5
+
+    def bk(lam):
+        cct._mutate_bonds(ura, lam)
+        return _bond(ura, "C1'", "N1").mod_type.k
+
+    assert bk(1.0) == pytest.approx(k_full)                      # full at the start
+    assert bk(0.75) == pytest.approx((1.0 - 0.25 / s) * k_full)  # 150.0, releasing
+    assert bk(0.5) == pytest.approx(0.0)                         # released by positioning fraction
+    assert bk(0.25) == pytest.approx(0.0)                        # stays released
+    assert bk(0.0) == pytest.approx(0.0)                         # fully broken at the common core

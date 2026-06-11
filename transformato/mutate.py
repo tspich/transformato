@@ -1849,10 +1849,11 @@ class CommonCoreTransformation(object):
                 if not self.allow_bonded_breaking:
                     logger.critical(ligand1_bond)
                     raise RuntimeError("No corresponding bond in cc2 found: {}".format(ligand1_bond))
-                # migrating/breaking bond: present in cc1 but not cc2 -> scale
-                # k -> 0 over lambda (full at lambda=1, gone at lambda=0). req is
-                # held at the cc1 value; a k=0 bond contributes no energy.
-                modified_k = lambda_value * ligand1_bond.type.k
+                # migrating/breaking bond: present in cc1 but not cc2 -> scale k -> 0,
+                # front-loaded (released by the positioning fraction, in lockstep with the
+                # forming bond and breaking torsions; see _breaking_k_fraction). req is held
+                # at the cc1 value; a k=0 bond contributes no energy.
+                modified_k = self._breaking_k_fraction(lambda_value) * ligand1_bond.type.k
                 modified_req = ligand1_bond.type.req
                 logger.info(
                     f"Breaking bond {ligand1_bond.atom1.name}-{ligand1_bond.atom2.name}: "
@@ -1946,8 +1947,9 @@ class CommonCoreTransformation(object):
                 if not self.allow_bonded_breaking:
                     logger.critical(cc1_angle)
                     raise RuntimeError("No corresponding angle in cc2 found")
-                # breaking angle (rides on a migrating bond): scale k -> 0.
-                modified_k = lambda_value * cc1_angle.type.k
+                # breaking angle (rides on a migrating bond): scale k -> 0, front-loaded
+                # (released by the positioning fraction, in lockstep with the breaking bond).
+                modified_k = self._breaking_k_fraction(lambda_value) * cc1_angle.type.k
                 modified_theteq = cc1_angle.type.theteq
                 logger.info(
                     f"Breaking angle {cc1_angle.atom1.name}-{cc1_angle.atom2.name}-"
@@ -2351,6 +2353,20 @@ class CommonCoreTransformation(object):
             frac = (p - s) / (1.0 - s) if s < 1.0 else 1.0
             k_fraction = cls._FORMING_K_SOFT + (1.0 - cls._FORMING_K_SOFT) * frac
         return k_fraction, geom
+
+    @classmethod
+    def _breaking_k_fraction(cls, lambda_value):
+        """Force-constant fraction for a breaking bond/angle: full at lambda=1, ramped to 0
+        by the positioning fraction (p = _FORMING_REQ_FRACTION), then held at 0 -- i.e. the
+        breaking term RELEASES in lockstep with the forming term's req descent (and with the
+        breaking torsions, which already use this profile). Releasing early lets the atom
+        migrate smoothly to its new partner instead of being pinned near full strength until
+        it abruptly lets go (the (11,12) overlap gap), and it removes the breaking term well
+        before the common core so there is no force-constant change at the final window (the
+        (21,22) gap). Linear lambda*k left both gaps."""
+        p = 1.0 - lambda_value
+        s = cls._FORMING_REQ_FRACTION
+        return max(1.0 - p / s, 0.0) if s > 0.0 else 0.0
 
     @staticmethod
     def _atom_xyz(atom):
