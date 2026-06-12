@@ -333,3 +333,23 @@ def test_breaking_bond_releases_by_positioning_fraction():
     assert bk(0.5) == pytest.approx(0.0)                         # released by positioning fraction
     assert bk(0.25) == pytest.approx(0.0)                        # stays released
     assert bk(0.0) == pytest.approx(0.0)                         # fully broken at the common core
+
+
+def test_cc_lambda_schedule_densifies_commitment_band():
+    """Non-uniform cc-transform schedule: uniform by default, but n_extra inserts windows
+    only inside the [center-halfwidth, center+halfwidth] band -- used to densify the
+    migration commitment point (lambda~0.5) that a uniform grid leaves at ~0 overlap."""
+    from transformato.mutate import _cc_lambda_schedule
+
+    uni = _cc_lambda_schedule(30)
+    assert uni == _cc_lambda_schedule(30, n_extra=0)        # n_extra=0 == uniform
+    assert len(uni) == 30
+    assert max(uni) < 1.0 and min(uni) == 0.0              # 1.0 dropped, 0.0 kept
+    assert uni == sorted(set(uni), reverse=True)           # descending, unique
+
+    dens = _cc_lambda_schedule(30, n_extra=8, center=0.5, halfwidth=0.1)
+    assert len(dens) > len(uni)
+    assert dens == sorted(set(dens), reverse=True)
+    extra = set(dens) - set(uni)
+    assert extra and all(0.4 <= x <= 0.6 for x in extra)   # additions only inside the band
+    assert any(0.5 < x < 0.533333 for x in dens)           # bridges the (0.533->0.5) gap

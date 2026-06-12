@@ -48,12 +48,33 @@ def _performe_linear_charge_scaling(
         )
 
 
+def _cc_lambda_schedule(nr_of_steps, n_extra=0, center=0.5, halfwidth=0.1):
+    """Common-core transform lambda values, 1 -> 0 (the 1.0 endpoint is dropped; it equals
+    the pre-transform state). Uniform ``linspace`` by default.
+
+    If ``n_extra`` > 0, that many extra windows are inserted (evenly) within
+    ``[center - halfwidth, center + halfwidth]`` -- a *localized* densification. For the
+    bond-migration this targets the commitment point (p = 0.5, i.e. lambda = 0.5), where the
+    breaking bond releases and C1' snaps onto its new partner; a uniform grid leaves a single
+    ~0-overlap gap exactly there even at high resolution. The decoupling-adjacent and
+    stiffening halves keep their original spacing.
+    """
+    base = list(np.linspace(1.0, 0.0, nr_of_steps + 1)[1:])
+    if n_extra and n_extra > 0:
+        lo, hi = center - halfwidth, center + halfwidth
+        base += list(np.linspace(hi, lo, n_extra + 2)[1:-1])  # interior points of the band
+    return sorted({round(float(x), 6) for x in base}, reverse=True)  # unique, lambda 1 -> 0
+
+
 def _performe_linear_cc_scaling(
     nr_of_steps: int,
     intermediate_factory,
     mutation,
+    n_extra: int = 0,
+    center: float = 0.5,
+    halfwidth: float = 0.1,
 ) -> int:
-    for lambda_value in np.linspace(1, 0, nr_of_steps + 1)[1:]:
+    for lambda_value in _cc_lambda_schedule(nr_of_steps, n_extra, center, halfwidth):
         print("####################")
         print(
             f"Perform parameter scaling on cc in step: {intermediate_factory.current_step} with lamb: {lambda_value}"
@@ -75,6 +96,9 @@ def perform_mutations(
     nr_of_mutation_steps_lj_of_heavy_atoms: int = 1,
     nr_of_mutation_steps_cc: int = 5,
     endstate_correction: bool = False,
+    nr_of_cc_densify_extra: int = 0,
+    cc_densify_center: float = 0.5,
+    cc_densify_halfwidth: float = 0.1,
 ):
     """Performs the mutations necessary to mutate the physical endstate to the defined common core.
 
@@ -237,11 +261,15 @@ def perform_mutations(
         except KeyError:
             nr_of_mutation_steps_cc = nr_of_mutation_steps_cc
 
-        # change bonded parameters on common core
+        # change bonded parameters on common core (optionally densified around the
+        # migration commitment point, p=0.5, via nr_of_cc_densify_extra)
         _performe_linear_cc_scaling(
             nr_of_steps=nr_of_mutation_steps_cc,
             intermediate_factory=i,
             mutation=mutation_list["transform"],
+            n_extra=nr_of_cc_densify_extra,
+            center=cc_densify_center,
+            halfwidth=cc_densify_halfwidth,
         )
 
     if endstate_correction:
