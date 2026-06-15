@@ -130,19 +130,21 @@ def perform_mutations(
     # turn off electrostatics
     ######################################
     m = mutation_list["charge"]
-    # turn off charges
-    # if number of charge mutation steps are defined in config file overwrite default or passed value
-    try:
-        nr_of_mutation_steps_charge = configuration["system"][i.system.structure]["mutation"]["steps_charge"]
-        print("Using number of steps for charge mutattions as defined in config file")
-    except KeyError:
-        pass
+    # turn off charges (only if there are dummy charges to turn off; a fully-mapped
+    # common core has none -- its charges are interpolated in the cc-transform)
+    if m:
+        # if number of charge mutation steps are defined in config file overwrite default or passed value
+        try:
+            nr_of_mutation_steps_charge = configuration["system"][i.system.structure]["mutation"]["steps_charge"]
+            print("Using number of steps for charge mutattions as defined in config file")
+        except KeyError:
+            pass
 
-    _performe_linear_charge_scaling(
-        nr_of_steps=nr_of_mutation_steps_charge,
-        intermediate_factory=i,
-        mutation=m,
-    )
+        _performe_linear_charge_scaling(
+            nr_of_steps=nr_of_mutation_steps_charge,
+            intermediate_factory=i,
+            mutation=m,
+        )
     ######################################
     # turn off LJ
     ######################################
@@ -239,7 +241,7 @@ def perform_mutations(
     ######################################
     # generate terminal LJ
     ######################################
-    if not configuration["simulation"]["free-energy-type"] == "asfe":
+    if not configuration["simulation"]["free-energy-type"] == "asfe" and mutation_list["default-lj"]:
         print("####################")
         print(
             f"Generate terminal LJ particle in step: {i.current_step} on atoms: {[v.vdw_atom_idx for v in mutation_list['default-lj']]}"
@@ -473,8 +475,20 @@ class ProposeMutationRoute(object):
                 matching_terminal_atoms_between_cc.append((cc1_idx, cc2_idx))
             else:
                 pass
-        if not matching_terminal_atoms_between_cc:
+
+        # A fully-mapped common core (every atom paired, no dummies on either
+        # side -- e.g. the uridine <-> pseudouridine reflection mapping) has no
+        # atoms bridging core<->dummy, so there is nothing to match here. That is
+        # legitimate: the whole transformation is the cc-transform. Only abort if
+        # there *are* dummy atoms but none could be matched.
+        no_dummy_region = not self.get_idx_not_in_common_core_for_mol1() and not self.get_idx_not_in_common_core_for_mol2()
+        if not matching_terminal_atoms_between_cc and not no_dummy_region:
             raise RuntimeError("No terminal real atoms were matched between the common cores. Aborting.")
+        if no_dummy_region:
+            logger.info(
+                "Common core spans all atoms in both ligands (no dummy region); "
+                "skipping terminal-atom matching -- the full transformation is the cc-transform."
+            )
 
         self.matching_terminal_atoms_between_cc = matching_terminal_atoms_between_cc
 
@@ -1368,9 +1382,9 @@ class ProposeMutationRoute(object):
         if show_atom_type:
             for i in mol.GetAtoms():
                 opts.atomLabels[i.GetIdx()] = str(i.GetProp("atom_index")) + ":" + i.GetProp("atom_type")
-        elif mol.GetNumAtoms() < 30:
-            for i in mol.GetAtoms():
-                opts.atomLabels[i.GetIdx()] = str(i.GetProp("atom_index")) + ":" + i.GetProp("atom_name")
+        #elif mol.GetNumAtoms() < 30:
+        #    for i in mol.GetAtoms():
+        #        opts.atomLabels[i.GetIdx()] = str(i.GetProp("atom_index")) + ":" + i.GetProp("atom_name")
 
         rdCoordGen.AddCoords(mol)  # Create Cordinates
 
@@ -1407,7 +1421,10 @@ class ProposeMutationRoute(object):
         mutations: list
             list of mutations
         """
-        if not self.terminal_real_atom_cc1:
+        # guard that finish_common_core has run; terminal_real_atom_cc1 is set there
+        # but is legitimately empty for a dummy-free (fully-mapped) common core, so
+        # test for existence rather than truthiness.
+        if not hasattr(self, "terminal_real_atom_cc1"):
             raise RuntimeError("First generate the MCS")
 
         m = self._mutate_to_common_core(self.dummy_region_cc2, self.get_common_core_idx_mol2(), mol_name="m2")
@@ -1633,8 +1650,11 @@ class ProposeMutationRoute(object):
                         mutations["lj"].append(m)
 
         else:
-            logger.critical("No atoms will be decoupled.")
-            mutations = defaultdict()
+            # No dummies to decouple (e.g. a fully-mapped common core). Keep a
+            # list-defaulting dict so downstream key access (mutation_list["charge"]
+            # etc.) yields empty lists rather than raising KeyError.
+            logger.info("No atoms will be decoupled (fully-mapped common core).")
+            mutations = defaultdict(list)
         return mutations
 
 
