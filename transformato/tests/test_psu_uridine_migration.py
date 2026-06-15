@@ -116,6 +116,77 @@ class _FakeMol:
         return self._n
 
 
+# --- minimal RDKit mols carrying only atom_name, for build_uracil_reflection_mapping ---
+def _rdkit_named_mol(atom_names):
+    from rdkit import Chem
+
+    rw = Chem.RWMol()
+    for nm in atom_names:
+        idx = rw.AddAtom(Chem.Atom(nm[0]))  # element from first char (C/N/O/H)
+        rw.GetAtomWithIdx(idx).SetProp("atom_name", nm)
+    return rw.GetMol()
+
+
+class _FakeRoute:
+    """Just enough of a ProposeMutationRoute for build_uracil_reflection_mapping:
+    two RDKit mols whose atoms carry an atom_name property."""
+
+    def __init__(self, m1_names, m2_names):
+        self.mols = {"m1": _rdkit_named_mol(m1_names), "m2": _rdkit_named_mol(m2_names)}
+
+
+def _names_of(route, key):
+    return {a.GetIdx(): a.GetProp("atom_name") for a in route.mols[key].GetAtoms()}
+
+
+# ---------------------------------------------------------------------------
+# the promoted reflection-mapping helper (uridine <-> pseudouridine, no dummies)
+# ---------------------------------------------------------------------------
+def test_uracil_reflection_mapping_forward():
+    from transformato.mutate import build_uracil_reflection_mapping
+
+    route = _FakeRoute([n for n, _ in URA_ATOMS], [n for n, _ in PSU_ATOMS])
+    pairs = build_uracil_reflection_mapping(route)
+    assert len(pairs) == len(URA_ATOMS)  # full bijection -- no dummies
+    n1, n2 = _names_of(route, "m1"), _names_of(route, "m2")
+    d = {n1[i]: n2[j] for i, j in pairs}
+    assert d["N1"] == "C5" and d["C5"] == "N1"   # sugar-atom reflection (N<->C flip)
+    assert d["H5"] == "H1"                        # swapped hydrogen, no dummy
+    assert d["C2"] == "C4" and d["O2"] == "O4"   # mirror through the N3-C6 axis
+    assert d["C6"] == "C6" and d["N3"] == "N3"   # axis atoms map to themselves
+    assert d["C1'"] == "C1'"                      # ribose maps by identical name
+
+
+def test_uracil_reflection_mapping_orientation_autodetect():
+    from transformato.mutate import build_uracil_reflection_mapping
+
+    # structure1 = pseudouridine (reverse orientation) must still map correctly
+    route = _FakeRoute([n for n, _ in PSU_ATOMS], [n for n, _ in URA_ATOMS])
+    pairs = build_uracil_reflection_mapping(route)
+    assert len(pairs) == len(PSU_ATOMS)
+    n1, n2 = _names_of(route, "m1"), _names_of(route, "m2")
+    d = {n1[i]: n2[j] for i, j in pairs}
+    assert d["H1"] == "H5"                        # reverse hydrogen swap
+    assert d["N1"] == "C5"
+
+
+def test_uracil_reflection_mapping_rejects_non_uracil():
+    from transformato.mutate import build_uracil_reflection_mapping
+
+    names = ["C1'", "N1", "C2", "C6"]  # no distinguishing base H5/H1
+    route = _FakeRoute(names, names)
+    with pytest.raises(RuntimeError, match="orient"):
+        build_uracil_reflection_mapping(route)
+
+
+def test_uracil_reflection_mapping_rejects_duplicate_names():
+    from transformato.mutate import build_uracil_reflection_mapping
+
+    route = _FakeRoute([n for n, _ in URA_ATOMS] + ["N1"], [n for n, _ in PSU_ATOMS] + ["C9"])
+    with pytest.raises(RuntimeError, match="duplicate atom name"):
+        build_uracil_reflection_mapping(route)
+
+
 # ---------------------------------------------------------------------------
 # Phase 0: the name-based mapping helper produces the right common core
 # ---------------------------------------------------------------------------

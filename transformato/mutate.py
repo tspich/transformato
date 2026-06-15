@@ -313,6 +313,94 @@ class MutationDefinition:
             print(f"VDW atoms to be decoupled: {self.vdw_atom_idx}")
 
 
+# Atom-name correspondence for the uracil pseudo-mirror through the N3-C6 axis.
+# It maps the sugar-bearing ring atom of one nucleoside onto the other's
+# (uridine N1 <-> pseudouridine C5), so the glycosidic bond does NOT migrate and
+# no atom becomes a dummy -- the whole U<->Psi change reduces to a smooth
+# cc-transform (two N<->C atom-type flips + the C5=C6 double bond relocating
+# across C6). The heavy-atom swap is an involution; only the lone ring hydrogen
+# differs by side (uridine H5 on C5 <-> pseudouridine H1 on N1, which is handled
+# separately via orientation detection).
+_URACIL_MIRROR_HEAVY = {
+    "N1": "C5",
+    "C5": "N1",
+    "C2": "C4",
+    "C4": "C2",
+    "O2": "O4",
+    "O4": "O2",
+    # C6, N3 (and their H6, H3) lie on/near the mirror axis -> identity
+}
+
+
+def build_uracil_reflection_mapping(route) -> list:
+    """Explicit ``(mol1_idx, mol2_idx)`` common-core mapping for a uridine <->
+    pseudouridine pair, using uracil's N3-C6 pseudo-mirror.
+
+    Base atoms map by the reflection (``_URACIL_MIRROR_HEAVY`` + the H5/H1 swap);
+    every other atom (the ribose, and the backbone/phosphate when the residue
+    sits in a duplex) maps by identical name. Orientation is detected
+    automatically from the distinguishing base hydrogen (H5 = uridine, H1 =
+    pseudouridine), so it works whichever ligand is structure1.
+
+    Pass the result to
+    ``route.set_common_core_mapping(mapping, allow_bonded_topology_change=False)``
+    instead of ``propose_common_core()`` -- the automatic MCS matches by element
+    and cannot express the N1<->C5 reflection.
+
+    Raises if the result is not a full bijection: a stray unmapped atom would mean
+    a dummy (and a mis-specified mapping), and a duplicate atom name usually means
+    ``route.mols`` is the whole system rather than the single mutated residue.
+    """
+
+    def name_to_idx(mol):
+        d = {}
+        for atom in mol.GetAtoms():
+            name = atom.GetProp("atom_name")
+            if name in d:
+                raise RuntimeError(
+                    f"duplicate atom name {name!r} in ligand mol -- the reflection "
+                    "mapping needs unique names (is route.mols the single mutated "
+                    "residue, not the whole duplex?)."
+                )
+            d[name] = atom.GetIdx()
+        return d
+
+    n1 = name_to_idx(route.mols["m1"])
+    n2 = name_to_idx(route.mols["m2"])
+
+    # orient from the distinguishing base hydrogen (H5 uridine / H1 pseudouridine)
+    if "H5" in n1 and "H1" in n2:
+        h_src, h_dst = "H5", "H1"
+    elif "H1" in n1 and "H5" in n2:
+        h_src, h_dst = "H1", "H5"
+    else:
+        raise RuntimeError(
+            "could not orient the uracil reflection: expected the base H5 (uridine) "
+            "on one ligand and H1 (pseudouridine) on the other "
+            f"(m1 has H5={'H5' in n1}/H1={'H1' in n1}, m2 has H5={'H5' in n2}/H1={'H1' in n2})."
+        )
+
+    name_map = dict(_URACIL_MIRROR_HEAVY)
+    name_map[h_src] = h_dst  # involution for heavy atoms; H is side-specific
+
+    mapping, missing = [], []
+    for name, i1 in n1.items():
+        target = name_map.get(name, name)
+        if target in n2:
+            mapping.append((i1, n2[target]))
+        else:
+            missing.append((name, target))
+    if missing:
+        raise RuntimeError(f"uracil reflection mapping could not match atoms m1->m2: {missing}")
+    if len(mapping) != len(n1) or len(mapping) != len(n2):
+        raise RuntimeError(
+            f"uracil reflection mapping is not a full bijection: {len(mapping)} pairs "
+            f"for {len(n1)} (m1) / {len(n2)} (m2) atoms -- expected no dummies."
+        )
+    logger.info(f"Built uracil reflection mapping ({len(mapping)} atom pairs, orientation H_src={h_src}).")
+    return mapping
+
+
 class ProposeMutationRoute(object):
     def __init__(
         self,
