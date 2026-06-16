@@ -2109,6 +2109,14 @@ class CommonCoreTransformation(object):
     def _mutate_torsions(self, psf: pm.charmm.CharmmPsfFile, lambda_value: float):
         mod_type = namedtuple("Torsion", "phi_k, per, phase, scee, scnb")
 
+        # The Amber parm7 is written from psf.dihedrals directly (not from mod_type,
+        # which only feeds the CHARMM .prm). It needs the cc torsions rebuilt in the
+        # topology at every lambda -- handled separately so the originals ramp off and
+        # nothing accumulates (see _mutate_torsions_amber).
+        if type(psf) == pm.amber.AmberParm:
+            self._mutate_torsions_amber(psf, lambda_value)
+            return
+
         # get all torsions present in initial topology
         for original_torsion in psf.view[f":{self.tlc_cc1}"].dihedrals:
             if getattr(original_torsion, "_tf_forming", False):
@@ -2225,21 +2233,6 @@ class CommonCoreTransformation(object):
 
                     original_torsion.mod_type = mod_types
 
-                    # do this only when using GAFF
-                    if type(psf) == pm.amber.AmberParm:
-                        pm.tools.actions.addDihedral(
-                            psf,
-                            f":{self.tlc_cc1}@{original_torsion.atom1.idx+1}",
-                            f":{self.tlc_cc1}@{original_torsion.atom2.idx+1}",
-                            f":{self.tlc_cc1}@{original_torsion.atom3.idx+1}",
-                            f":{self.tlc_cc1}@{original_torsion.atom4.idx+1}",
-                            modified_phi_k,
-                            torsion_t.per,
-                            torsion_t.phase,
-                            torsion_t.scnb,
-                            torsion_t.scee,
-                        ).execute()
-
             if not found:
                 if not self.allow_bonded_breaking:
                     logger.critical(original_torsion)
@@ -2277,6 +2270,126 @@ class CommonCoreTransformation(object):
 
         if self.allow_bonded_breaking:
             self._form_missing_torsions(psf, lambda_value, mod_type)
+
+    def _mutate_torsions_amber(self, psf: pm.amber.AmberParm, lambda_value: float):
+        """Interpolate the common-core torsions for the Amber path.
+
+        Unlike CHARMM (whose interpolated ``mod_type`` is written into a .prm by atom
+        type), the Amber parm7 is written straight from ``psf.dihedrals``. The previous
+        code *appended* terms with ``addDihedral`` and left the originals in place;
+        because the same psf is reused at every cc lambda, the duplicates accumulated
+        geometrically (a glycosidic torsion reached 12500 copies, +50000 kJ/mol ->
+        "Particle coordinate is NaN").
+
+        To stay safe with Amber's 1-4 bookkeeping (multi-term dihedrals, impropers with
+        scee=0, the ignore_end carrier that ``write_parm`` re-derives) we do NOT rebuild
+        dihedrals. We keep the original cc1 dihedral *objects* -- so write_parm sees the
+        same valid topology it always has -- and only scale their phi_k in place (cc1
+        torsions that change type ramp 1 -> 0 by lambda 0.5; unchanged torsions and all
+        impropers stay full). The cc2 contribution is added as ramped-on *proper* terms
+        (with a valid scee, ignore_end=True so they create no second 1-4) and stripped
+        again at the next lambda so nothing accumulates.
+        """
+        f_cc1 = max(1.0 - (1.0 - lambda_value) * 2.0, 0.0)  # cc1 full at lambda 1 -> 0 by 0.5
+        f_cc2 = 1.0 - min(lambda_value * 2.0, 1.0)  # cc2 0 by 0.5 -> full at lambda 0
+
+        def terms_of(dih):
+            return [dih.type] if isinstance(dih.type, pm.topologyobjects.DihedralType) else list(dih.type)
+
+        def atypes(dih):
+            return tuple(sorted((dih.atom1.type, dih.atom2.type, dih.atom3.type, dih.atom4.type)))
+
+        view = psf.view[f":{self.tlc_cc1}"]
+        name_to_idx = {a.name: a.idx for a in view.atoms}
+        cc_idx = {name_to_idx[n] for n in self.atom_names_mapping if n in name_to_idx}
+
+        def is_cc1_torsion(d):
+            return (
+                {d.atom1.idx, d.atom2.idx, d.atom3.idx, d.atom4.idx} <= cc_idx
+                and not getattr(d, "_tf_forming", False)
+                and not getattr(d, "_tf_cc2", False)
+            )
+
+        # cc2 *proper* reference torsions, grouped by atom-name quad (constant -> once)
+        if not hasattr(self, "_amber_cc2_propers"):
+            mapped = set(self.atom_names_mapping.values())
+            cc2 = {}
+            for d in self.ligand2_psf.dihedrals:
+                names = (d.atom1.name, d.atom2.name, d.atom3.name, d.atom4.name)
+                if all(n in mapped for n in names) and not d.improper:
+                    cc2.setdefault(tuple(sorted(names)), []).append(d)
+            self._amber_cc2_propers = cc2
+
+        # one-time prep of the cc1 *proper* torsions (impropers are left completely
+        # untouched -- they keep their original objects and scee=0, and write_parm never
+        # makes an improper a 1-4 carrier). Give each proper its own type so scaling is
+        # local, record the pristine phi_k, force a valid 1-4 scee on every term (Amber
+        # stores scee=0 on the redundant terms; since write_parm re-derives which term
+        # carries the 1-4, any of them must advertise a usable scee), and flag the
+        # propers whose type changes in cc2.
+        if not hasattr(self, "_amber_cc1_prepared"):
+            for d in psf.dihedrals:
+                if not is_cc1_torsion(d) or d.improper:
+                    continue
+                scee14 = next((t.scee for t in terms_of(d) if abs(t.scee) > 1e-9), 1.2)
+                scnb14 = next((t.scnb for t in terms_of(d) if abs(t.scnb) > 1e-9), 2.0)
+                if isinstance(d.type, pm.topologyobjects.DihedralType):
+                    nt = pm.DihedralType(d.type.phi_k, d.type.per, d.type.phase, scee14, scnb14)
+                    psf.dihedral_types.append(nt)
+                    d.type = nt
+                else:
+                    lst = pm.topologyobjects.DihedralTypeList()
+                    for t in d.type:
+                        nt = pm.DihedralType(t.phi_k, t.per, t.phase, scee14, scnb14)
+                        psf.dihedral_types.append(nt)
+                        lst.append(nt)
+                    d.type = lst
+                d._tf_phi0 = [t.phi_k for t in terms_of(d)]
+                quad = tuple(sorted((d.atom1.name, d.atom2.name, d.atom3.name, d.atom4.name)))
+                cc2_match = self._amber_cc2_propers.get(quad)
+                d._tf_changed = cc2_match is not None and atypes(d) != atypes(cc2_match[0])
+            self._amber_cc1_prepared = True
+
+        # drop cc2 terms added on a previous lambda (the same psf is reused)
+        psf.dihedrals[:] = [d for d in psf.dihedrals if not getattr(d, "_tf_cc2", False)]
+
+        # scale cc1 proper phi_k in place; a changed torsion keeps its object (the 1-4
+        # carrier) even at phi_k=0 -> the 1-4 exception always survives.
+        changed_quads = set()
+        for d in psf.dihedrals:
+            if not is_cc1_torsion(d) or not hasattr(d, "_tf_phi0"):
+                continue
+            factor = f_cc1 if d._tf_changed else 1.0
+            for t, phi0 in zip(terms_of(d), d._tf_phi0):
+                t.phi_k = phi0 * factor
+            if d._tf_changed:
+                changed_quads.add(tuple(sorted((d.atom1.name, d.atom2.name, d.atom3.name, d.atom4.name))))
+
+        # add the cc2 proper torsions for the changed quads, ramped on by f_cc2
+        atoms = psf.atoms
+        for quad in changed_quads:
+            for d2 in self._amber_cc2_propers.get(quad, []):
+                idx = [name_to_idx[d2.atom1.name], name_to_idx[d2.atom2.name],
+                       name_to_idx[d2.atom3.name], name_to_idx[d2.atom4.name]]
+                for t in terms_of(d2):
+                    phi_k = t.phi_k * f_cc2
+                    if abs(phi_k) < 1e-10:
+                        continue
+                    scee = t.scee if abs(t.scee) > 1e-9 else 1.2
+                    scnb = t.scnb if abs(t.scnb) > 1e-9 else 2.0
+                    nt = pm.DihedralType(phi_k, t.per, t.phase, scee, scnb)
+                    psf.dihedral_types.append(nt)
+                    nd = pm.Dihedral(
+                        atoms[idx[0]], atoms[idx[1]], atoms[idx[2]], atoms[idx[3]],
+                        improper=False, ignore_end=True, type=nt,
+                    )
+                    nd._tf_cc2 = True
+                    psf.dihedrals.append(nd)
+
+        if self.allow_bonded_breaking:
+            self._form_missing_torsions(psf, lambda_value, namedtuple("Torsion", "phi_k, per, phase, scee, scnb"))
+
+        psf.remake_parm()
 
     # ------------------------------------------------------------------ #
     # Bond/angle/torsion *forming* (Phase 1b, see DESIGN_pseudouridine.md)
