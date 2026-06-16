@@ -1842,6 +1842,20 @@ class CommonCoreTransformation(object):
                     )
                     ligand1_atom.charge = modified_charge
 
+                    # For Amber the parm7 is written from parm_data, not from the
+                    # atom attribute, and the LJ interpolation that runs next
+                    # (_mutate_atoms -> addLJType) re-syncs every atom.charge FROM
+                    # parm_data -- silently reverting this bare assignment. Push the
+                    # change into parm_data via the action tool (as the dummy-charge
+                    # path does) so it survives addLJType and write_parm.
+                    if type(psf) == pm.amber.AmberParm:
+                        pm.tools.actions.change(
+                            psf,
+                            "CHARGE",
+                            f":{self.tlc_cc1}@{ligand1_atom.idx + 1}",
+                            modified_charge,
+                        ).execute()
+
             if not found:
                 raise RuntimeError("No corresponding atom in cc2 found")
 
@@ -2275,20 +2289,30 @@ class CommonCoreTransformation(object):
         """Interpolate the common-core torsions for the Amber path.
 
         Unlike CHARMM (whose interpolated ``mod_type`` is written into a .prm by atom
-        type), the Amber parm7 is written straight from ``psf.dihedrals``. The previous
-        code *appended* terms with ``addDihedral`` and left the originals in place;
-        because the same psf is reused at every cc lambda, the duplicates accumulated
-        geometrically (a glycosidic torsion reached 12500 copies, +50000 kJ/mol ->
-        "Particle coordinate is NaN").
+        type), the Amber parm7 is written straight from ``psf.dihedrals``. Two earlier
+        approaches failed: appending cc2 terms with ``addDihedral`` accumulated
+        geometrically across the reused psf (a glycosidic torsion reached 12500 copies,
+        +50000 kJ/mol -> "Particle coordinate is NaN"); editing cloned ``DihedralType``
+        objects *in place* and caching them across lambda-states broke whenever the
+        charge/LJ action tools (``change``/``addLJType``, run earlier in ``mutate``)
+        called ``remake_parm`` between states -- that re-derives ``dihedral_types`` and
+        orphans the cached objects, collapsing the whole residue's torsions onto one
+        stray type.
 
-        To stay safe with Amber's 1-4 bookkeeping (multi-term dihedrals, impropers with
-        scee=0, the ignore_end carrier that ``write_parm`` re-derives) we do NOT rebuild
-        dihedrals. We keep the original cc1 dihedral *objects* -- so write_parm sees the
-        same valid topology it always has -- and only scale their phi_k in place (cc1
-        torsions that change type ramp 1 -> 0 by lambda 0.5; unchanged torsions and all
-        impropers stay full). The cc2 contribution is added as ramped-on *proper* terms
-        (with a valid scee, ignore_end=True so they create no second 1-4) and stripped
-        again at the next lambda so nothing accumulates.
+        This implementation is therefore **stateless across calls**: the pristine cc1
+        torsion parameters are snapshotted once *per psf* (so complex and waterbox each
+        keep their own), keyed by the dihedral's atom indices + periodicity + phase --
+        all stable across ``remake_parm`` -- and every lambda rebuilds each touched
+        dihedral's type *fresh* from that snapshot, so nothing depends on a DihedralType
+        surviving an intervening reindex. Only quads whose parameters actually differ
+        between cc1 and cc2 are ramped (cc1 phi_k 1->0 over the second half of lambda,
+        cc2 added 0->1 over the first); every other proper and every improper keeps its
+        pristine parameters. The "changed" decision compares the cc1/cc2 *parameter*
+        multisets, not atom types (``_mutate_atoms`` renames cc atoms to RRR*). cc2 terms
+        are added as ignore_end=True propers (no second 1-4) and stripped each call so
+        nothing accumulates. A valid 1-4 scee/scnb is forced on every emitted term
+        because Amber stores scee=0 on redundant terms and write_parm may pick any as the
+        1-4 carrier.
         """
         f_cc1 = max(1.0 - (1.0 - lambda_value) * 2.0, 0.0)  # cc1 full at lambda 1 -> 0 by 0.5
         f_cc2 = 1.0 - min(lambda_value * 2.0, 1.0)  # cc2 0 by 0.5 -> full at lambda 0
@@ -2296,12 +2320,10 @@ class CommonCoreTransformation(object):
         def terms_of(dih):
             return [dih.type] if isinstance(dih.type, pm.topologyobjects.DihedralType) else list(dih.type)
 
-        def atypes(dih):
-            return tuple(sorted((dih.atom1.type, dih.atom2.type, dih.atom3.type, dih.atom4.type)))
-
         view = psf.view[f":{self.tlc_cc1}"]
         name_to_idx = {a.name: a.idx for a in view.atoms}
         cc_idx = {name_to_idx[n] for n in self.atom_names_mapping if n in name_to_idx}
+        inv_map = {v: k for k, v in self.atom_names_mapping.items()}  # cc2 name -> cc1 name
 
         def is_cc1_torsion(d):
             return (
@@ -2309,6 +2331,15 @@ class CommonCoreTransformation(object):
                 and not getattr(d, "_tf_forming", False)
                 and not getattr(d, "_tf_cc2", False)
             )
+
+        def cc2_quad(d):
+            # this cc1 dihedral's atom names mapped to cc2 names, sorted (cc2 reference
+            # torsions are keyed this way); None if any atom is not a mapped cc atom.
+            try:
+                return tuple(sorted(self.atom_names_mapping[a.name]
+                                    for a in (d.atom1, d.atom2, d.atom3, d.atom4)))
+            except KeyError:
+                return None
 
         # cc2 *proper* reference torsions, grouped by atom-name quad (constant -> once)
         if not hasattr(self, "_amber_cc2_propers"):
@@ -2320,57 +2351,84 @@ class CommonCoreTransformation(object):
                     cc2.setdefault(tuple(sorted(names)), []).append(d)
             self._amber_cc2_propers = cc2
 
-        # one-time prep of the cc1 *proper* torsions (impropers are left completely
-        # untouched -- they keep their original objects and scee=0, and write_parm never
-        # makes an improper a 1-4 carrier). Give each proper its own type so scaling is
-        # local, record the pristine phi_k, force a valid 1-4 scee on every term (Amber
-        # stores scee=0 on the redundant terms; since write_parm re-derives which term
-        # carries the 1-4, any of them must advertise a usable scee), and flag the
-        # propers whose type changes in cc2.
-        if not hasattr(self, "_amber_cc1_prepared"):
+        # Per-psf pristine snapshot of the cc1 propers (impropers are left untouched --
+        # write_parm never makes an improper a 1-4 carrier). Captured on the first call
+        # for this psf, before any edit: the first cc lambda is the first time torsions
+        # are touched, so the phi_k read here are the physical cc1 values. Also decide,
+        # once, which mapped quads actually differ cc1<->cc2.
+        if not hasattr(psf, "_tf_cc1_snapshot"):
+            snap = {}
+            cc1_by_quad = {}
             for d in psf.dihedrals:
                 if not is_cc1_torsion(d) or d.improper:
                     continue
+                q = cc2_quad(d)
                 scee14 = next((t.scee for t in terms_of(d) if abs(t.scee) > 1e-9), 1.2)
                 scnb14 = next((t.scnb for t in terms_of(d) if abs(t.scnb) > 1e-9), 2.0)
-                if isinstance(d.type, pm.topologyobjects.DihedralType):
-                    nt = pm.DihedralType(d.type.phi_k, d.type.per, d.type.phase, scee14, scnb14)
-                    psf.dihedral_types.append(nt)
-                    d.type = nt
-                else:
-                    lst = pm.topologyobjects.DihedralTypeList()
-                    for t in d.type:
-                        nt = pm.DihedralType(t.phi_k, t.per, t.phase, scee14, scnb14)
-                        psf.dihedral_types.append(nt)
-                        lst.append(nt)
-                    d.type = lst
-                d._tf_phi0 = [t.phi_k for t in terms_of(d)]
-                quad = tuple(sorted((d.atom1.name, d.atom2.name, d.atom3.name, d.atom4.name)))
-                cc2_match = self._amber_cc2_propers.get(quad)
-                d._tf_changed = cc2_match is not None and atypes(d) != atypes(cc2_match[0])
-            self._amber_cc1_prepared = True
+                key_atoms = (d.atom1.idx, d.atom2.idx, d.atom3.idx, d.atom4.idx)
+                for t in terms_of(d):
+                    snap[(key_atoms, t.per, round(t.phase, 4))] = (t.phi_k, scee14, scnb14)
+                    if q is not None:
+                        cc1_by_quad.setdefault(q, []).append((t.per, round(t.phase, 4), round(t.phi_k, 5)))
+            changed = set()
+            for q, cc1_terms in cc1_by_quad.items():
+                cc2_terms = sorted(
+                    (t.per, round(t.phase, 4), round(t.phi_k, 5))
+                    for d2 in self._amber_cc2_propers.get(q, [])
+                    for t in terms_of(d2)
+                )
+                if sorted(cc1_terms) != cc2_terms:
+                    changed.add(q)
+            psf._tf_cc1_snapshot = snap
+            psf._tf_changed_quads = changed
+        snap = psf._tf_cc1_snapshot
+        changed_quads = psf._tf_changed_quads
 
         # drop cc2 terms added on a previous lambda (the same psf is reused)
         psf.dihedrals[:] = [d for d in psf.dihedrals if not getattr(d, "_tf_cc2", False)]
 
-        # scale cc1 proper phi_k in place; a changed torsion keeps its object (the 1-4
-        # carrier) even at phi_k=0 -> the 1-4 exception always survives.
-        changed_quads = set()
+        # Only the quads that actually differ cc1<->cc2 are touched; every unchanged
+        # proper (sugar, backbone, ...) and every improper keeps its original type
+        # object untouched. This is deliberate: rebuilding the *whole* residue's type
+        # table every lambda churns ~120 fresh DihedralTypes and, under the heavy parm
+        # manipulation the charge/LJ actions already do, desynced parm_data from the
+        # live objects (write_parm then serialized a stray force constant for sugar).
+        # Leaving unchanged dihedrals alone keeps their pristine indices intact. The
+        # changed quads are rebuilt *fresh from the snapshot* each lambda so they never
+        # depend on a prior edit surviving an intervening remake_parm.
         for d in psf.dihedrals:
-            if not is_cc1_torsion(d) or not hasattr(d, "_tf_phi0"):
+            if d.improper or not is_cc1_torsion(d):
                 continue
-            factor = f_cc1 if d._tf_changed else 1.0
-            for t, phi0 in zip(terms_of(d), d._tf_phi0):
-                t.phi_k = phi0 * factor
-            if d._tf_changed:
-                changed_quads.add(tuple(sorted((d.atom1.name, d.atom2.name, d.atom3.name, d.atom4.name))))
+            q = cc2_quad(d)
+            if q is None or q not in changed_quads:
+                continue
+            key_atoms = (d.atom1.idx, d.atom2.idx, d.atom3.idx, d.atom4.idx)
+            new_types = []
+            for t in terms_of(d):
+                entry = snap.get((key_atoms, t.per, round(t.phase, 4)))
+                if entry is None:
+                    scee = t.scee if abs(t.scee) > 1e-9 else 1.2
+                    scnb = t.scnb if abs(t.scnb) > 1e-9 else 2.0
+                    new_types.append(pm.DihedralType(t.phi_k, t.per, t.phase, scee, scnb))
+                else:
+                    phi0, scee, scnb = entry
+                    new_types.append(pm.DihedralType(phi0 * f_cc1, t.per, t.phase, scee, scnb))
+            if len(new_types) == 1:
+                psf.dihedral_types.append(new_types[0])
+                d.type = new_types[0]
+            else:
+                lst = pm.topologyobjects.DihedralTypeList()
+                for nt in new_types:
+                    psf.dihedral_types.append(nt)
+                    lst.append(nt)
+                d.type = lst
 
         # add the cc2 proper torsions for the changed quads, ramped on by f_cc2
         atoms = psf.atoms
         for quad in changed_quads:
             for d2 in self._amber_cc2_propers.get(quad, []):
-                idx = [name_to_idx[d2.atom1.name], name_to_idx[d2.atom2.name],
-                       name_to_idx[d2.atom3.name], name_to_idx[d2.atom4.name]]
+                idx = [name_to_idx[inv_map[d2.atom1.name]], name_to_idx[inv_map[d2.atom2.name]],
+                       name_to_idx[inv_map[d2.atom3.name]], name_to_idx[inv_map[d2.atom4.name]]]
                 for t in terms_of(d2):
                     phi_k = t.phi_k * f_cc2
                     if abs(phi_k) < 1e-10:
@@ -2389,6 +2447,12 @@ class CommonCoreTransformation(object):
         if self.allow_bonded_breaking:
             self._form_missing_torsions(psf, lambda_value, namedtuple("Torsion", "phi_k, per, phase, scee, scnb"))
 
+        # Every DihedralType created above (rebuilt cc1 quads + added cc2 terms) lands in
+        # psf.dihedral_types with idx == -1 until claimed. write_parm serialises a
+        # dihedral via its type.idx, and remake_parm does NOT claim on its own here, so an
+        # unclaimed type would write parm_data[-1] (a stray force constant). claim() index
+        # the list first.
+        psf.dihedral_types.claim()
         psf.remake_parm()
 
     # ------------------------------------------------------------------ #
