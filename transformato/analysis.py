@@ -268,6 +268,11 @@ class FreeEnergyCalculator(object):
                 if start == -1:
                     xyz, unitcell_lengths, _ = traj.read()
                     xyz, start, stride = self._thinning(xyz)
+                    # thin the box vectors the same way as xyz. Only needed for this
+                    # first state: later states read with seek(start)+stride, so their
+                    # unitcell_lengths are already aligned. Without this the first state's
+                    # box list stays full-length -> len(confs) != len(unitcell_).
+                    unitcell_lengths = unitcell_lengths[start::stride]
                 else:
                     traj.seek(start)
                     xyz, unitcell_lengths, _ = traj.read(stride=stride)
