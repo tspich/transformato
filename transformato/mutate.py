@@ -331,6 +331,22 @@ _URACIL_MIRROR_HEAVY = {
     # C6, N3 (and their H6, H3) lie on/near the mirror axis -> identity
 }
 
+# AMBER's modified-RNA libraries (e.g. all_modrna08) predate the 2013 atom-name
+# conventions: they spell several shared sugar/phosphate atoms -- and the base
+# protons -- differently from the PDB v3 / CHARMM naming that _URACIL_MIRROR_HEAVY
+# and the orientation check below assume. A pseudouridine residue typed by that
+# library therefore disagrees on name with a standard (OL3) uridine for every
+# shared backbone atom, so the by-name half of the mapping would otherwise fail.
+# Normalize the modrna08 spellings to the v3 form so the reflection mapping is
+# identical for CHARMM and AMBER inputs (this is the inverse of the rename the
+# AMBER prep applies to feed tleap's modrna08 templates). v3 names are unaffected.
+_AMBER_RNA_NAME_ALIASES = {
+    "O1P": "OP1", "O2P": "OP2", "O3P": "OP3",
+    "H5'1": "H5'", "H5'2": "H5''",
+    "HO'2": "HO2'", "HO'5": "HO5'", "HO'3": "HO3'",
+    "HN1": "H1", "HN3": "H3",
+}
+
 
 def build_uracil_reflection_mapping(route) -> list:
     """Explicit ``(mol1_idx, mol2_idx)`` common-core mapping for a uridine <->
@@ -340,7 +356,10 @@ def build_uracil_reflection_mapping(route) -> list:
     every other atom (the ribose, and the backbone/phosphate when the residue
     sits in a duplex) maps by identical name. Orientation is detected
     automatically from the distinguishing base hydrogen (H5 = uridine, H1 =
-    pseudouridine), so it works whichever ligand is structure1.
+    pseudouridine), so it works whichever ligand is structure1. AMBER/modrna08
+    atom names (``O1P``, ``H5'1``, ``HN1`` ...) are normalized to the PDB v3 /
+    CHARMM spelling via ``_AMBER_RNA_NAME_ALIASES`` first, so both force fields
+    map identically.
 
     Pass the result to
     ``route.set_common_core_mapping(mapping, allow_bonded_topology_change=False)``
@@ -355,7 +374,8 @@ def build_uracil_reflection_mapping(route) -> list:
     def name_to_idx(mol):
         d = {}
         for atom in mol.GetAtoms():
-            name = atom.GetProp("atom_name")
+            raw = atom.GetProp("atom_name")
+            name = _AMBER_RNA_NAME_ALIASES.get(raw, raw)  # canonicalize modrna08 -> v3
             if name in d:
                 raise RuntimeError(
                     f"duplicate atom name {name!r} in ligand mol -- the reflection "
@@ -377,7 +397,9 @@ def build_uracil_reflection_mapping(route) -> list:
         raise RuntimeError(
             "could not orient the uracil reflection: expected the base H5 (uridine) "
             "on one ligand and H1 (pseudouridine) on the other "
-            f"(m1 has H5={'H5' in n1}/H1={'H1' in n1}, m2 has H5={'H5' in n2}/H1={'H1' in n2})."
+            f"(m1 has H5={'H5' in n1}/H1={'H1' in n1}, m2 has H5={'H5' in n2}/H1={'H1' in n2}). "
+            "If this is an AMBER/modrna08 residue, the N1 proton is spelled 'HN1' "
+            "(normalized to 'H1' here) -- check the atom is present and named HN1."
         )
 
     name_map = dict(_URACIL_MIRROR_HEAVY)
