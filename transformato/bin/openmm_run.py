@@ -92,36 +92,31 @@ integrator = LangevinIntegrator(
 # Set platform
 platform = Platform.getPlatformByName("CUDA")
 
-# Check if restraints.yaml exists - if it does, system uses restraints
+# Optional A-form backbone-torsion restraint for the single-strand (waterbox)
+# reference state. constrain_waterbox.py writes restraint_torsions.yaml (a list of
+# atom-index quads + theta0 [rad] + K [kJ/mol]) into a waterbox state dir to hold the
+# strand helical/stacked (the Turner NN reference is helical, not a floppy coil).
+# Added to `system` BEFORE the Simulation is built, so it is present during sampling
+# AND in the serialized _system.xml that analysis.py re-evaluates -> MBAR-consistent.
+# A no-op unless the file is present (so it never affects other systems/users).
+if env == "waterbox" and os.path.isfile("restraint_torsions.yaml"):
+    import yaml as _yaml
 
-# pdbpath = args.inpfile.replace(".inp", ".pdb")
-
-# if os.path.exists("./restraints.yaml") and "complex" in pdbpath:
-#     import transformato.restraints as tfrs
-#     import yaml
-
-#     print("Found restraints.yaml - applying restraints")
-#     # Load tiny restraints config
-#     with open("./restraints.yaml", "r") as stream:
-#         try:
-#             configuration = yaml.safe_load(stream)
-#         except yaml.YAMLError as exc:
-#             print(exc)
-
-#     cc_names = configuration["system"]["structure"]["ccs"]
-
-#     # Add forces via transformato.restraints
-
-#     if not os.path.exists(pdbpath):
-#         raise FileNotFoundError(
-#             f"Couldnt find {pdbpath} necessary for Restraint Analysis"
-#         )
-
-#     restraintList = tfrs.create_restraints_from_config(configuration, pdbpath)
-
-#     for restraint in restraintList:
-#         restraint.createForce(cc_names)
-#         restraint.applyForce(system)
+    with open("restraint_torsions.yaml") as _fh:
+        _rspec = _yaml.safe_load(_fh)
+    _torsions = _rspec.get("torsions", [])
+    _rforce = CustomTorsionForce("K*(1-cos(theta-theta0))")
+    _rforce.addPerTorsionParameter("K")
+    _rforce.addPerTorsionParameter("theta0")
+    _rforce.setName("AformBackboneRestraint")
+    for _t in _torsions:
+        _i, _j, _k, _l = _t["idx"]
+        _rforce.addTorsion(_i, _j, _k, _l, [float(_t["K"]), float(_t["theta0"])])
+    system.addForce(_rforce)
+    print(
+        f"Applied A-form torsion restraint: {len(_torsions)} torsions "
+        f"(K from restraint_torsions.yaml) to the {env} system"
+    )
 
 
 # Build simulation context
