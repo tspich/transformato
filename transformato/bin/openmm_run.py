@@ -22,6 +22,25 @@ parser.add_argument("-odcd", metavar="DCDFILE", dest="odcd")
 parser.add_argument("-env", metavar="ENVIRONMENT", dest="env")
 args = parser.parse_args()
 
+# Resubmission after a time-out: a run that finished leaves <dcd>.done and is skipped,
+# so a resubmitted job only redoes the run that was interrupted (from its start; a partial
+# dcd without marker is overwritten). analyze.py warns about dcds without marker.
+DONE_MARKER = f"{args.odcd}.done"
+if os.path.isfile(DONE_MARKER):
+    print(f"{args.odcd} already finished ({DONE_MARKER} exists) -- skipping")
+    sys.exit(0)
+
+# Short equilibration before production (not written to the trajectory): velocities at the
+# simulation temperature, EQUIL_RESTRAINED_PS with the solute heavy atoms harmonically held at
+# the minimized positions (removes clashes / lets water and ions relax around the RNA), then
+# EQUIL_FREE_PS unrestrained. Set both to 0 to disable. The positional restraint is removed
+# from the System before production, so the serialized _system.xml used for MBAR never
+# contains it.
+EQUIL_RESTRAINED_PS = 50.0
+EQUIL_FREE_PS = 50.0
+EQUIL_K = 1000.0  # kJ/mol/nm^2
+_NON_SOLUTE = {"HOH", "WAT", "TIP3", "SOD", "CLA", "POT", "NA", "CL", "K", "NA+", "CL-", "K+", "MG"}
+
 # Load parameters
 env = args.env
 print(f"Loading parameters in this environment {env}")
@@ -145,6 +164,38 @@ if inputs.gen_vel == "yes":
     else:
         simulation.context.setVelocitiesToTemperature(inputs.gen_temp)
 
+# Equilibration (see EQUIL_* above)
+n_restr = int(round(EQUIL_RESTRAINED_PS / inputs.dt))
+n_free = int(round(EQUIL_FREE_PS / inputs.dt))
+if n_restr + n_free > 0:
+    if inputs.gen_vel != "yes":
+        simulation.context.setVelocitiesToTemperature(inputs.temp * kelvin)
+    if n_restr > 0:
+        ref = simulation.context.getState(getPositions=True).getPositions()
+        posres = CustomExternalForce("0.5*k_eq*periodicdistance(x, y, z, x0, y0, z0)^2")
+        posres.addGlobalParameter("k_eq", EQUIL_K)
+        for p in ("x0", "y0", "z0"):
+            posres.addPerParticleParameter(p)
+        n_atoms = 0
+        for atom in top.topology.atoms():
+            if atom.residue.name.upper() in _NON_SOLUTE:
+                continue
+            if atom.element is not None and atom.element.symbol == "H":
+                continue
+            posres.addParticle(atom.index, ref[atom.index].value_in_unit(nanometers))
+            n_atoms += 1
+        posres_index = system.addForce(posres)
+        simulation.context.reinitialize(preserveState=True)
+        print(f"\nEquilibration: {EQUIL_RESTRAINED_PS} ps with {n_atoms} solute heavy atoms restrained")
+        simulation.step(n_restr)
+        system.removeForce(posres_index)
+        simulation.context.reinitialize(preserveState=True)
+    if n_free > 0:
+        print(f"Equilibration: {EQUIL_FREE_PS} ps unrestrained")
+        simulation.step(n_free)
+    print(simulation.context.getState(getEnergy=True).getPotentialEnergy())
+    simulation.currentStep = 0
+
 # Production
 print("\nMD run: %s steps" % inputs.nstep)
 simulation.reporters.append(DCDReporter(args.odcd, inputs.nstdcd))
@@ -175,3 +226,7 @@ with open(file_name + "_integrator.xml", "w") as outfile:
     outfile.write(XmlSerializer.serialize(integrator))
 with open(file_name + "_system.xml", "w") as outfile:
     outfile.write(XmlSerializer.serialize(system))
+
+# mark this run as complete (written last, after every output file)
+with open(DONE_MARKER, "w") as f:
+    f.write(f"{inputs.nstep} steps\n")
