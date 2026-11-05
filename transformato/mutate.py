@@ -2501,6 +2501,12 @@ class CommonCoreTransformation(object):
             self._amber_cc2_impropers = cc2
         cc2_impr = self._amber_cc2_impropers
 
+        def ordered(names):
+            # an improper's energy depends on the atom ORDER (central atom 3rd); only the
+            # exact sequence or its reverse describe the same dihedral angle
+            names = tuple(names)
+            return min(names, names[::-1])
+
         if not hasattr(psf, "_tf_cc1_impr_snapshot"):
             snap, cc1_by_quad = {}, {}
             for d in psf.dihedrals:
@@ -2511,11 +2517,16 @@ class CommonCoreTransformation(object):
                 for t in terms_of(d):
                     snap[(key_atoms, t.per, round(t.phase, 4))] = t.phi_k
                     if q is not None:
-                        cc1_by_quad.setdefault(q, []).append((t.per, round(t.phase, 4), round(t.phi_k, 5)))
+                        order = ordered(self.atom_names_mapping[a.name] for a in (d.atom1, d.atom2, d.atom3, d.atom4))
+                        cc1_by_quad.setdefault(q, []).append((order, t.per, round(t.phase, 4), round(t.phi_k, 5)))
             changed = set()
             for q in set(cc1_by_quad) | set(cc2_impr):
+                # same parameters but a different atom order (e.g. U vs Psi N3-H3 improper,
+                # outer atoms swapped by the mirror) is a different term -> also replaced
                 cc2_terms = sorted(
-                    (t.per, round(t.phase, 4), round(t.phi_k, 5)) for d2 in cc2_impr.get(q, []) for t in terms_of(d2)
+                    (ordered((d2.atom1.name, d2.atom2.name, d2.atom3.name, d2.atom4.name)), t.per, round(t.phase, 4), round(t.phi_k, 5))
+                    for d2 in cc2_impr.get(q, [])
+                    for t in terms_of(d2)
                 )
                 if sorted(cc1_by_quad.get(q, [])) != cc2_terms:
                     changed.add(q)
