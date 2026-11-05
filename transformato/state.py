@@ -169,7 +169,7 @@ class IntermediateStateFactory(object):
             for mutation_type in mutation_conf:
                 if (
                     common_core_transformation < 1.0
-                ):  # NOTE: THis is inconsistent -- the mutatino_type is the actual mutation in this case
+                ):  # NOTE: THis is inconsistent -- the mutation_type is the actual mutation in this case
                     # This happens only for one ligand and starts the process of changing cc1 into cc2
                     mutation_type.mutate(
                         psf=self.system.psfs[env],
@@ -1095,14 +1095,16 @@ class IntermediateStateFactory(object):
             ):
                 # print('>> Setting dummy improper parameters for: {}-{}-{}-{}'.format(str(atom1.type),str(atom2.type),str(atom3.type),str(atom4.type)))
                 # carefull with this solution - > central atom has to be set in the beginning
+                # use the interpolated cc parameters if _mutate_impropers set them
+                impr_type = getattr(impr, "mod_type", None) or impr.type
                 prm_file_handler.write(
                     "{:7} {:7} {:7} {:7} {:9.5f} {:9.5f} \n".format(
                         str(atom1.type),
                         str(atom2.type),
                         str(atom3.type),
                         str(atom4.type),
-                        impr.type.psi_k,
-                        impr.type.psi_eq,
+                        impr_type.psi_k,
+                        impr_type.psi_eq,
                     )
                 )
 

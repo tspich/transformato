@@ -2466,6 +2466,8 @@ class CommonCoreTransformation(object):
                     nd._tf_cc2 = True
                     psf.dihedrals.append(nd)
 
+        self._mutate_impropers_amber(psf, f_cc1, f_cc2, is_cc1_torsion, cc2_quad, terms_of, name_to_idx, inv_map)
+
         if self.allow_bonded_breaking:
             self._form_missing_torsions(psf, lambda_value, namedtuple("Torsion", "phi_k, per, phase, scee, scnb"))
 
@@ -2476,6 +2478,93 @@ class CommonCoreTransformation(object):
         # the list first.
         psf.dihedral_types.claim()
         psf.remake_parm()
+
+    def _mutate_impropers_amber(self, psf, f_cc1, f_cc2, is_cc1_torsion, cc2_quad, terms_of, name_to_idx, inv_map):
+        """Amber impropers (periodic dihedrals flagged ``improper``) of the common core.
+
+        Same stateless scheme as the propers in _mutate_torsions_amber: for every improper
+        quad whose parameters differ cc1 <-> cc2, the cc1 term is rebuilt from a per-psf
+        pristine snapshot with phi_k * f_cc1 and the cc2 term is added (atom order taken from
+        cc2, mapped to cc1 indices) with phi_k * f_cc2; added terms carry ``_tf_cc2`` and are
+        stripped at the start of every call by _mutate_torsions_amber. Impropers never carry
+        1-4 interactions (ignore_end=True). Previously impropers were skipped entirely, so
+        the cc endpoint kept cc1's impropers (e.g. U's C1'-N1-C6-C2 1.0 vs Psi's 1.1
+        kcal/mol) and was not the cc2 molecule.
+        """
+        if not hasattr(self, "_amber_cc2_impropers"):
+            mapped = set(self.atom_names_mapping.values())
+            cc2 = {}
+            for d in self.ligand2_psf.dihedrals:
+                names = (d.atom1.name, d.atom2.name, d.atom3.name, d.atom4.name)
+                if d.improper and all(n in mapped for n in names):
+                    cc2.setdefault(tuple(sorted(names)), []).append(d)
+            self._amber_cc2_impropers = cc2
+        cc2_impr = self._amber_cc2_impropers
+
+        if not hasattr(psf, "_tf_cc1_impr_snapshot"):
+            snap, cc1_by_quad = {}, {}
+            for d in psf.dihedrals:
+                if not d.improper or not is_cc1_torsion(d):
+                    continue
+                q = cc2_quad(d)
+                key_atoms = (d.atom1.idx, d.atom2.idx, d.atom3.idx, d.atom4.idx)
+                for t in terms_of(d):
+                    snap[(key_atoms, t.per, round(t.phase, 4))] = t.phi_k
+                    if q is not None:
+                        cc1_by_quad.setdefault(q, []).append((t.per, round(t.phase, 4), round(t.phi_k, 5)))
+            changed = set()
+            for q in set(cc1_by_quad) | set(cc2_impr):
+                cc2_terms = sorted(
+                    (t.per, round(t.phase, 4), round(t.phi_k, 5)) for d2 in cc2_impr.get(q, []) for t in terms_of(d2)
+                )
+                if sorted(cc1_by_quad.get(q, [])) != cc2_terms:
+                    changed.add(q)
+            psf._tf_cc1_impr_snapshot = snap
+            psf._tf_changed_impr_quads = changed
+            for q in sorted(changed):
+                logger.info(f"Amber improper {'-'.join(q)} differs cc1 <-> cc2 and will be interpolated")
+        snap = psf._tf_cc1_impr_snapshot
+        changed = psf._tf_changed_impr_quads
+        if not changed:
+            return
+
+        for d in psf.dihedrals:
+            if not d.improper or not is_cc1_torsion(d):
+                continue
+            q = cc2_quad(d)
+            if q is None or q not in changed:
+                continue
+            key_atoms = (d.atom1.idx, d.atom2.idx, d.atom3.idx, d.atom4.idx)
+            new_types = []
+            for t in terms_of(d):
+                phi0 = snap.get((key_atoms, t.per, round(t.phase, 4)), t.phi_k)
+                new_types.append(pm.DihedralType(phi0 * f_cc1, t.per, t.phase, 1.2, 2.0))
+            for nt in new_types:
+                psf.dihedral_types.append(nt)
+            if len(new_types) == 1:
+                d.type = new_types[0]
+            else:
+                lst = pm.topologyobjects.DihedralTypeList()
+                for nt in new_types:
+                    lst.append(nt)
+                d.type = lst
+
+        atoms = psf.atoms
+        for q in changed:
+            for d2 in cc2_impr.get(q, []):
+                idx = [name_to_idx[inv_map[a.name]] for a in (d2.atom1, d2.atom2, d2.atom3, d2.atom4)]
+                for t in terms_of(d2):
+                    phi_k = t.phi_k * f_cc2
+                    if abs(phi_k) < 1e-10:
+                        continue
+                    nt = pm.DihedralType(phi_k, t.per, t.phase, 1.2, 2.0)
+                    psf.dihedral_types.append(nt)
+                    nd = pm.Dihedral(
+                        atoms[idx[0]], atoms[idx[1]], atoms[idx[2]], atoms[idx[3]],
+                        improper=True, ignore_end=True, type=nt,
+                    )
+                    nd._tf_cc2 = True
+                    psf.dihedrals.append(nd)
 
     # ------------------------------------------------------------------ #
     # Bond/angle/torsion *forming* (Phase 1b, see DESIGN_pseudouridine.md)
@@ -2793,6 +2882,51 @@ class CommonCoreTransformation(object):
             self._mutate_angles(psf, lambda_value)
             # scale torsions
             self._mutate_torsions(psf, lambda_value)
+            # scale impropers (CHARMM; the Amber impropers are periodic dihedrals and are
+            # handled inside _mutate_torsions_amber)
+            self._mutate_impropers(psf, lambda_value)
+
+    def _mutate_impropers(self, psf, lambda_value: float):
+        """Interpolate the CHARMM (harmonic) impropers of the common core cc1 -> cc2.
+
+        Previously impropers were never touched, so the final cc state kept cc1's improper
+        force constants (e.g. U's C2=O2 improper 110 vs Psi's 90 kcal/mol/rad^2) and the cc
+        endpoint was NOT the cc2 molecule. Matching is by the *set* of mapped atom names (the
+        atom order of an improper can legitimately differ between the two topologies);
+        k and psi_eq are interpolated linearly (lambda 1 = cc1, lambda 0 = cc2) and written
+        to the .prm via ``mod_type`` (state.py). cc1 impropers with no cc2 counterpart are
+        left unchanged and reported -- a common-core check will flag them.
+        """
+        if type(psf) == pm.amber.AmberParm:
+            return
+        mod_type = namedtuple("Improper", "psi_k, psi_eq")
+        mapped = set(self.atom_names_mapping.values())
+        cc2 = {}
+        for impr in self.ligand2_psf.impropers:
+            names = (impr.atom1.name, impr.atom2.name, impr.atom3.name, impr.atom4.name)
+            if all(n in mapped for n in names):
+                cc2.setdefault(frozenset(names), []).append(impr)
+        for impr in psf.view[f":{self.tlc_cc1}"].impropers:
+            names = (impr.atom1.name, impr.atom2.name, impr.atom3.name, impr.atom4.name)
+            if not all(n in self.atom_names_mapping for n in names):
+                continue
+            matches = cc2.get(frozenset(self.atom_names_mapping[n] for n in names))
+            if not matches:
+                logger.warning(f"improper {'-'.join(names)} has no cc2 counterpart; left unchanged")
+                continue
+            t1, t2 = impr.type, matches[0].type
+            if abs(t1.psi_k - t2.psi_k) < 1e-9 and abs(t1.psi_eq - t2.psi_eq) < 1e-9:
+                continue
+            if max(abs(t1.psi_eq), abs(t2.psi_eq)) > 1e-6:
+                logger.warning(
+                    f"improper {'-'.join(names)} has psi_eq != 0 ({t1.psi_eq} / {t2.psi_eq}); "
+                    "interpolated assuming the same atom order in both topologies"
+                )
+            impr.mod_type = mod_type(
+                lambda_value * t1.psi_k + (1.0 - lambda_value) * t2.psi_k,
+                lambda_value * t1.psi_eq + (1.0 - lambda_value) * t2.psi_eq,
+            )
+            logger.info(f"Improper {'-'.join(names)}: k {t1.psi_k} -> {impr.mod_type.psi_k} (lambda={lambda_value})")
 
     @staticmethod
     def _modify_type_in_cc(atom: pm.Atom, psf: pm.charmm.CharmmPsfFile):
